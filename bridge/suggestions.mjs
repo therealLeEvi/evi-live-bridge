@@ -106,7 +106,7 @@ export function estimateOfferFill(remainingQty, volumeEntry, targetDurationMinut
 //
 // 1. Stale prices. The Wiki's /latest high and low are LAST-TRADED prices with their own timestamps,
 // not a live order book. On a thinly traded item the pair can be hours old and describe a spread
-// nobody is actually offering -- the "buy at 6,400, sell at 30,000" shape that looks like free money
+// nobody is actually offering -- the "buy at 6,400, sell at 30,000" shape that looks like free GP
 // and is really just two unrelated old trades. That matters more now that a market-wide pick is
 // sized to the item's whole buy limit rather than 100 units. Returns the age in minutes of the
 // STALER of the two sides, or null when the response carries no usable timestamps (fail open).

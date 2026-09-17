@@ -131,7 +131,7 @@ test('an unrecognized risk value falls back to medium rather than throwing or ma
 });
 
 // -- maxSpend: the player's actual current cash stack (read from their inventory), so a
-// suggestion never assumes more money than they actually have on hand right now. --
+// suggestion never assumes more GP than they actually have on hand right now. --
 
 test('maxSpend caps suggested quantity to what the cash stack can afford', () => {
   const flips = [flip(), flip({quantity: 200})]; // median qty 150, buy price 100gp/unit
@@ -934,7 +934,7 @@ test('holding at a profit: break-even is still given, no loss flagged; unknown c
   assert.equal(unknown.lossIfSoldNow, null);
 });
 
-// ---- Three gates that protect a new user from trades that cost money or cannot happen:
+// ---- Three gates that protect a new user from trades that cost GP or cannot happen:
 // stale last-traded prices, members-only items on a free-to-play world, and the GE's 4-hour buy
 // limit. All fail open: unknown data never blocks a candidate.
 const FRESH = Math.floor(Date.now() / 1000);
@@ -954,7 +954,7 @@ test('priceAgeMinutes reports the staler side, and nothing when timestamps are m
 test('market: a spread nobody has traded recently is dropped, fresh prices are kept, unknown timestamps fail open', () => {
   const stale = {'1': {high: 30000, low: 6400, highTime: FRESH - 7 * 3600, lowTime: FRESH - 9 * 3600}};
   assert.equal(computeMarketSuggestion(mapping(), stale, volumes(), {blocklist: new Set([2])}), null,
-    'a 7-9 hour old "free money" spread must not be suggested');
+    'a 7-9 hour old "free GP" spread must not be suggested');
   assert.equal(computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2])}).itemId, 1);
   assert.equal(computeMarketSuggestion(mapping(), prices(), volumes(), {blocklist: new Set([2])}).itemId, 1,
     'no timestamps at all must not block anything');

@@ -5,10 +5,13 @@ import {fileURLToPath} from 'node:url';
 import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {Store} from './store.mjs';
 import {createMarketCache} from './marketCache.mjs';
-import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion} from './suggestions.mjs';
+import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,slotCapacity,slotNote} from './suggestions.mjs';
 import {estimateUnitTax} from './tax.mjs';
 import {createSuggestionLog} from './suggestionLog.mjs';
-import {createPriceArchive} from './priceArchive.mjs';
+import {joinSuggestionOutcomes,summarizeOutcomes} from './suggestionOutcomes.mjs';
+import {createPriceArchive,readArchive} from './priceArchive.mjs';
+import {buildFillModel,fillChance,fillChanceSentence} from './fillModel.mjs';
+import {relistAdvice} from './relist.mjs';
 
 // How stale a scanner-pushed shortlist (POST /api/scanner-suggestions) can be before GET
 // /api/suggestion stops trusting it and falls back to computeMarketSuggestion instead -- roughly
@@ -38,6 +41,22 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
   // hourly Wiki price archive (see priceArchive.mjs). The archive only runs once start() is called,
   // which the standalone entry point below does; tests never start it.
   const suggestionLog=createSuggestionLog(dir),archive=createPriceArchive({dir,log:m=>console.error(m)});
+  // The player's own fill record (see fillModel.mjs), rebuilt at most hourly and only from the
+  // archived hours their own offers actually fall in -- reading 90 days of archive on every
+  // suggestion would be absurd. Never fatal: any failure just means suggestions carry no fill
+  // sentence, exactly as before this existed.
+  let fillModelCache={at:0,model:null};
+  function playerFillModel(now=Date.now()) {
+    if(fillModelCache.model && now-fillModelCache.at<3600000)return fillModelCache.model;
+    try {
+      const offers=[...store.offers.values()].filter(o=>o.knownStart&&Number.isFinite(o.firstSeen));
+      if(!offers.length)return null;
+      const from=Math.floor(Math.min(...offers.map(o=>o.firstSeen))/1000)-3600;
+      const model=buildFillModel(offers,readArchive(dir,from),{now});
+      fillModelCache={at:now,model};
+      return model;
+    } catch { fillModelCache={at:now,model:null}; return null; }
+  }
   // In-memory only, deliberately not journaled to disk -- a bridge restart just means the next
   // scanner auto-refresh (within 60s, if the scanner tab is open) repopulates it. See POST
   // /api/scanner-suggestions and computePushedSuggestion in suggestions.mjs.
@@ -121,9 +140,11 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // extra. See estimatedFillMinutes in suggestions.mjs for what this estimate is (and isn't).
           const durationParam=Number(url.searchParams.get('duration'));
           const targetDurationMinutes=Number.isFinite(durationParam)&&durationParam>0?durationParam:undefined;
-          const volumes=targetDurationMinutes!==undefined
-            ?JSON.parse(await suggestionPrices.get('https://prices.runescape.wiki/api/v1/osrs/1h',60000)).data||{}
-            :undefined;
+          // Fetched on every request now, not only when a trade duration is set: the volume-share
+          // cap and the player's own fill record both need it. Cached for 60 seconds and shared with
+          // every other market route here, so it costs at most one upstream call a minute.
+          const volumes=await suggestionPrices.get('https://prices.runescape.wiki/api/v1/osrs/1h',60000)
+            .then(t=>JSON.parse(t).data||{}).catch(()=>undefined);
           // Price-direction forecast for a "buy" suggestion only (see ForecastHorizon/ForecastPolicy
           // on the plugin side). forecastHorizon is null -- meaning skip this entirely, no extra
           // Wiki calls, no change to reasoning -- unless the plugin's own config turned it on. The
@@ -189,6 +210,15 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
             };
           }
           const gates={membersBlocked,limitFor};
+          // How much of the cash stack one market-wide suggestion may commit, as a percentage
+          // (EviLiveConfig.maxTradeShare, default 25). Only meaningful alongside a known cash stack,
+          // and only applied to the market-wide tier -- a suggestion from the player's own history
+          // keeps the size that history implies. See MaxTradeShare.java for the backtest behind it.
+          const stackShareParam=Number(url.searchParams.get('stackShare'));
+          const maxStackShare=Number.isFinite(stackShareParam)&&stackShareParam>0&&stackShareParam<=100?stackShareParam/100:undefined;
+          // Starter profile (EviLiveConfig.tradingProfile): market-wide picks restricted to items the
+          // GE charges no tax on. See TradingProfile.java for the backtest behind it.
+          const taxFreeOnly=url.searchParams.get('profile')==='starter';
           const requireCushion=url.searchParams.get('cushion')==='1';
           async function cushionForSuggestion(candidate) {
             try {
@@ -210,9 +240,22 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // holdBuyPrice (the real average price this was actually bought at, when the plugin
           // knows it) is what lets that reminder say whether selling right now is a profit or a
           // loss, instead of a plain "sell near X gp" that reads the same either way.
+          // How much room the Grand Exchange itself has right now, as counted by the plugin from the
+          // 8 real slots (see EviLivePlugin's freeSlots/collectableSlots). OSRS allows 8 simultaneous
+          // offers and no more, so with every slot occupied and nothing finished waiting to be
+          // collected, there is nowhere to put anything EVI might rank -- it stops ranking and says
+          // so, rather than suggesting a trade the player cannot place.
+          //
+          // A slot holding a finished offer is deliberately NOT treated as no room: collecting it is
+          // one click, so ranking continues and the suggestion simply carries a note to collect
+          // first. Same for an absent/unparseable count, which means the plugin hasn't established a
+          // slot snapshot yet -- unknown never invents a constraint here, exactly like cash= and
+          // members=.
+          const capacity=slotCapacity(url.searchParams.get('freeSlots'),url.searchParams.get('collectable'));
+          const geFull=capacity.full;
           const holdBuyPriceParam=Number(url.searchParams.get('holdBuyPrice'));
           const holdBuyPrice=Number.isFinite(holdBuyPriceParam)&&holdBuyPriceParam>0?holdBuyPriceParam:undefined;
-          let suggestion=computeHoldingSuggestion(latest,Number(url.searchParams.get('holdItemId')),Number(url.searchParams.get('holdQty')),url.searchParams.get('holdName')||undefined,url.searchParams.get('holdBuyId')||undefined,holdBuyPrice);
+          let suggestion=geFull?null:computeHoldingSuggestion(latest,Number(url.searchParams.get('holdItemId')),Number(url.searchParams.get('holdQty')),url.searchParams.get('holdName')||undefined,url.searchParams.get('holdBuyId')||undefined,holdBuyPrice);
           // The live signal above is necessarily empty right after a RuneLite/plugin restart --
           // it only refills by observing a fresh buy-collect this session. Falls back to the
           // bridge's own persistent, on-disk record of open positions (survives any restart,
@@ -220,7 +263,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // still gets reminded about instead of silently forgotten. See pickPersistentOpenPosition
           // in suggestions.mjs.
           const state=store.state();
-          if(!suggestion) {
+          if(!suggestion && !geFull) {
             const openPosition=pickPersistentOpenPosition(state.autoOpenPositions,account,blocklist);
             if(openPosition) {
               suggestion=computeHoldingSuggestion(latest,openPosition.itemId,openPosition.remaining,openPosition.item,openPosition.buyId,openPosition.unitCost);
@@ -244,7 +287,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // this call only, never merged into the shared `blocklist` used by the ranking functions
           // below, since personal-use on one past purchase must never block a genuinely new flip of
           // the same item.
-          if(!suggestion && url.searchParams.get('includeInventory')==='1') {
+          if(!suggestion && !geFull && url.searchParams.get('includeInventory')==='1') {
             const inventory={};
             for(const pair of (url.searchParams.get('inventory')||'').split(',')) {
               const [idPart,qtyPart]=pair.split(':');
@@ -257,9 +300,11 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
               suggestion=computeInventorySuggestion(latest,inventory,mappingCache.list,{blocklist:inventoryBlocklist,membersBlocked});
             }
           }
-          if(!suggestion) {
+          if(!suggestion && !geFull) {
             suggestion=await pickWithForecast({
-              rank:bl=>computeSuggestion(state.flips,latest,Date.now(),{minProfit,blocklist:bl,risk,maxSpend,targetDurationMinutes,volumes,...gates}),
+              // Imported flips rank alongside observed ones (see Store.importFlips): a player who
+              // tracked trades elsewhere for months shouldn't be ranked as if they had no history.
+              rank:bl=>computeSuggestion([...state.flips,...state.importedFlips],latest,Date.now(),{minProfit,blocklist:bl,risk,maxSpend,targetDurationMinutes,volumes,maxStackShare,...gates}),
               forecastFor:forecastForSuggestion,policy:forecastPolicy,horizon:forecastHorizon,
               cushionFor:cushionForSuggestion,requireCushion,blocklist,
             });
@@ -271,7 +316,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // available and not stale; otherwise falls back to computeMarketSuggestion exactly as
           // before scanner-pushing existed, so a plugin user who never opens the scanner sees no
           // change and pays no extra mapping/volume fetch for a tier that will just fall through.
-          if(!suggestion && url.searchParams.get('includeMarket')==='1') {
+          if(!suggestion && !geFull && url.searchParams.get('includeMarket')==='1') {
             const pushedFresh=pushedSuggestions.length && (Date.now()-pushedSuggestionsAt)<=MAX_PUSHED_AGE_MS;
             let rank;
             if(pushedFresh) {
@@ -281,7 +326,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
                 itemIndex(),
                 volumes?Promise.resolve(volumes):suggestionPrices.get('https://prices.runescape.wiki/api/v1/osrs/1h',60000).then(t=>JSON.parse(t).data||{}),
               ]);
-              rank=bl=>computeMarketSuggestion(mappingCache.list,latest,marketVolumes,{minProfit,blocklist:bl,maxSpend,targetDurationMinutes,...gates});
+              rank=bl=>computeMarketSuggestion(mappingCache.list,latest,marketVolumes,{minProfit,blocklist:bl,maxSpend,targetDurationMinutes,maxStackShare,taxFreeOnly,...gates});
             }
             suggestion=await pickWithForecast({rank,forecastFor:forecastForSuggestion,policy:forecastPolicy,horizon:forecastHorizon,cushionFor:cushionForSuggestion,requireCushion,blocklist});
           }
@@ -323,11 +368,38 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // A "you're holding this" reminder is never hidden on a free-to-play world -- the position
           // and any loss on it are real, and the player may be about to hop -- but it does say that
           // the item can't actually be traded here, so the advice isn't silently unusable.
+          // What the player's own past offers of this size actually did -- their record, not a
+          // forecast, and only when there are enough of them to mean anything (see fillModel.mjs).
+          if(suggestion&&suggestion.action==='buy') {
+            const itemVolumes=volumes?.[String(suggestion.itemId)]
+              ??(await suggestionPrices.get('https://prices.runescape.wiki/api/v1/osrs/1h',60000).then(t=>(JSON.parse(t).data||{})[String(suggestion.itemId)]).catch(()=>null));
+            const window=targetDurationMinutes??1440;
+            const sentence=fillChanceSentence(fillChance(playerFillModel(),suggestion.quantity,itemVolumes,window),window);
+            if(sentence)suggestion.reasoning=(suggestion.reasoning||'')+' '+sentence;
+          }
+          // Every slot is occupied, but at least one holds a finished offer (or the plugin couldn't
+          // say). The suggestion is still shown -- it may well be the right trade -- with the one
+          // thing standing between the player and placing it.
+          const capacityNote=slotNote(capacity);
+          if(suggestion&&capacityNote)suggestion.reasoning=(suggestion.reasoning||'')+' '+capacityNote;
           if(suggestion&&suggestion.action==='sell'&&membersBlocked?.(suggestion.itemId))
             suggestion.reasoning=(suggestion.reasoning||'')+' Note: this is a members item, so it can only be traded on a members world -- not this one.';
           suggestionLog.record({account:url.searchParams.get('account')||undefined,suggestion,
             context:{cash:maxSpend??null,durationMinutes:targetDurationMinutes??null,minProfit:minProfit||null,risk}});
-          return send(200,{suggestion,openItemPrice,slotPrices,slotFill});
+          // Time-based relist advice for sell offers that have been sitting (see relist.mjs). Built
+          // from the bridge's own journal, which knows when each offer was placed and what its stock
+          // cost, so the plugin needs to send nothing extra for it.
+          const liveSells=state.active.filter(o=>['SELLING','CANCELLED_SELL'].includes(o.state)&&o.filled<o.total&&(!account||o.account===account));
+          const costBasis=new Map((state.autoOpenPositions||[]).filter(p=>!account||p.account===account).map(p=>[p.itemId,p.unitCost]));
+          const relistPrices=Object.fromEntries(liveSells.map(o=>[String(o.itemId),lookupItemPrice(latest,o.itemId)]).filter(([,p])=>p));
+          const relist=relistAdvice({
+            offers:liveSells.map(o=>({itemId:o.itemId,name:o.name,price:o.price,remaining:Math.max(0,o.total-o.filled),firstSeen:o.firstSeen})),
+            prices:relistPrices,costBasis,targetDurationMinutes:targetDurationMinutes??1440,
+          });
+          // slots: what the GE's own capacity allowed on this call, echoed back so the sidebar (and
+          // anything else reading this endpoint) can tell "nothing passed your settings" apart from
+          // "your settings were never consulted, because there was nowhere to place an offer".
+          return send(200,{suggestion,openItemPrice,slotPrices,slotFill,relistAdvice:relist,slots:capacity});
         } catch(e) {return send(502,{error:e.message});}
       }
       if(!ui) {
@@ -343,6 +415,10 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
         // (or undo that). See Store.closePosition.
         if(pathname==='/api/positions/close')return send(200,store.closePosition(await body()));
         if(pathname==='/api/price-archive')return send(200,archive.configure(await body()));
+        // Completed flips from another tracker, sent in small batches by tools/import-copilot.mjs
+        // (the request-body cap here is deliberately small). Ranking history only -- see
+        // Store.importFlips for why these never touch the observed-profit total.
+        if(pathname==='/api/flips/import')return send(200,store.importFlips(await body()));
         if(pathname==='/api/logout'){res.setHeader('Set-Cookie','evi=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return send(200,{ok:true});}
         // The scanner's own top-ranked shortlist (its EVI Score V1 -- personal history, liquidity,
         // stability, and prediction when loaded), pushed from EVI_Flip_Scanner_V3.html's
@@ -366,6 +442,13 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
       if(req.method!=='GET')return send(405,{error:'Method not allowed'});
       if(pathname==='/api/state')return send(200,store.state());
       if(pathname==='/api/price-archive')return send(200,archive.status());
+      // How EVI's own suggestions actually turned out (see suggestionOutcomes.mjs). Scanner-gated
+      // like every other view of the player's own data.
+      if(pathname==='/api/suggestion-outcomes') {
+        const state=store.state();
+        const rows=joinSuggestionOutcomes(suggestionLog.recent(500),[...store.offers.values()],[...state.flips,...state.autoFlips]);
+        return send(200,{summary:summarizeOutcomes(rows),recent:rows.slice(-25).reverse()});
+      }
       // Only public market/news endpoints. No arbitrary URL proxy and no trade data in requests.
       const routes={mapping:['mapping',3600000],latest:['latest',60000],'5m':['5m',60000],'1h':['1h',60000]};
       let upstream,ttl=300000,type='application/json';

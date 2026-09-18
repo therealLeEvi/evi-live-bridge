@@ -76,6 +76,37 @@ function estimatedFillMinutes(quantity, liquidity, windowMinutes) {
   return quantity / (liquidity / windowMinutes);
 }
 
+// ---- Corrections measured against real offers, not chosen by feel.
+// `tools/calibrate-fills.mjs` compared 104 of this account's own offers -- each one watched from
+// placement to completion -- against what the raw estimate above would have predicted for the hour
+// it was placed in (archived Wiki volumes). Two findings, both reproducible by re-running that tool:
+//
+//  1. The raw estimate says "instant" for a small order in a liquid item, and nothing is instant
+//     unless you cross the spread. Offers taking under 1% of an hour's volume were predicted at
+//     0.45 min and actually took a median of 5.3 min, so there is a floor.
+//  2. EVI always suggests buying at the low and selling at the high -- passive on both sides, by
+//     construction. Passive offers (60 of the 104) took a median of 1.5x longer than predicted.
+//     Aggressive offers that crossed the spread filled essentially instantly, which is why the
+//     factor is specific to the kind of offer EVI actually suggests.
+//
+// These make the estimate less wrong; they do not make it precise. The same measurement found the
+// 90th percentile still 16.7x off, which is why DURATION_TOLERANCE exists below and why every piece
+// of wording built on this stays a hedged observation rather than a promise.
+export const FILL_FLOOR_MINUTES = 5;
+export const PASSIVE_FILL_FACTOR = 1.5;
+// How far past the player's target a corrected estimate may run before a candidate is dropped
+// outright. At 1 (the old behaviour) the imprecision above would throw away perfectly good trades on
+// a number that is routinely off by more than that; at 2 the filter still removes the genuinely
+// slow-moving items it exists for. Sizing is NOT given this tolerance -- quantities are cut to the
+// real target, since being sized too big is what leaves stock unsold.
+export const DURATION_TOLERANCE = 2;
+
+// Applies both corrections to a raw estimate. Infinity (no usable volume) stays Infinity.
+export function correctedFillMinutes(rawMinutes) {
+  if (!Number.isFinite(rawMinutes)) return rawMinutes;
+  return Math.max(FILL_FLOOR_MINUTES, rawMinutes) * PASSIVE_FILL_FACTOR;
+}
+
 // Applies the exact same coarse, volume-based feasibility estimate above -- not a new or different
 // heuristic -- to an offer the player has ALREADY placed, rather than one being sized before it's
 // placed (see computeSuggestion/computeMarketSuggestion's own use of estimatedFillMinutes). Purely
@@ -91,7 +122,9 @@ export function estimateOfferFill(remainingQty, volumeEntry, targetDurationMinut
   if (!(remainingQty > 0) || !Number.isFinite(targetDurationMinutes) || targetDurationMinutes <= 0) return null;
   if (!volumeEntry) return null;
   const liquidity = Math.min(volumeEntry.highPriceVolume || 0, volumeEntry.lowPriceVolume || 0);
-  const minutes = estimatedFillMinutes(remainingQty, liquidity, VOLUME_WINDOW_MINUTES);
+  // Corrected the same way as every other use (see correctedFillMinutes): this hint is about an
+  // offer already sitting in the GE, which is a passive offer by definition.
+  const minutes = correctedFillMinutes(estimatedFillMinutes(remainingQty, liquidity, VOLUME_WINDOW_MINUTES));
   return {
     // -1 is a deliberate sentinel for "no meaningful recent trading at all" (minutes === Infinity)
     // -- never JSON's null (which the plugin's Gson mapping would refuse for a primitive int field)
@@ -171,13 +204,38 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
       if (affordable < 1) continue; // can't afford even one unit at the current cash stack
       if (affordable < quantity) { quantity = affordable; cashLimited = true; }
     }
+    // The same concentration limit the market-wide tier applies (see maxStackShare there). A history
+    // of trading an item says nothing about it being safe to put the whole stack into: the losses the
+    // backtest found were all one expensive, slow item holding everything, and that shape does not
+    // care which tier suggested it.
+    let stackLimited = false;
+    if (Number.isFinite(options.maxStackShare) && options.maxStackShare > 0 && maxSpend !== undefined) {
+      const withinShare = Math.floor(maxSpend * options.maxStackShare / p.low);
+      if (withinShare < 1) continue; // one unit alone would commit more of the stack than allowed
+      if (withinShare < quantity) { quantity = withinShare; stackLimited = true; }
+    }
+    // The same volume-share cap the market-wide tier applies (see DEFAULT_MAX_VOLUME_SHARE). Having
+    // traded an item before says nothing about the market absorbing a large order today: measured
+    // against this account's own offers, orders above 200% of an item's hourly trading finished
+    // within a day only 17% of the time, against 65% for orders under 10%.
+    let shareLimited = false;
+    const ownVolume = options.volumes?.[String(h.itemId)];
+    const ownLiquidity = ownVolume ? Math.min(ownVolume.highPriceVolume || 0, ownVolume.lowPriceVolume || 0) : 0;
+    const personalVolumeShare = Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : DEFAULT_MAX_VOLUME_SHARE;
+    if (ownLiquidity > 0 && personalVolumeShare > 0) {
+      const withinVolume = Math.max(1, Math.floor(ownLiquidity * personalVolumeShare));
+      if (withinVolume < quantity) { quantity = withinVolume; shareLimited = true; }
+    }
     let durationLimited = false;
     if (targetDurationMinutes !== undefined) {
       const v = options.volumes?.[String(h.itemId)];
       const liquidity = v ? Math.min(v.highPriceVolume || 0, v.lowPriceVolume || 0) : 0;
       if (liquidity > 0) {
-        if (estimatedFillMinutes(1, liquidity, VOLUME_WINDOW_MINUTES) > targetDurationMinutes) continue; // not realistic even at quantity 1 within the window
-        const fillable = Math.max(1, Math.floor(liquidity / VOLUME_WINDOW_MINUTES * targetDurationMinutes));
+        // Dropped only when even a single unit would run well past the target (see
+        // DURATION_TOLERANCE), because the estimate is too imprecise to reject on a near miss.
+        if (correctedFillMinutes(estimatedFillMinutes(1, liquidity, VOLUME_WINDOW_MINUTES)) > targetDurationMinutes * DURATION_TOLERANCE) continue;
+        // Sizing gets no tolerance: too large is what leaves stock unsold at the end of the window.
+        const fillable = Math.max(1, Math.floor(liquidity / VOLUME_WINDOW_MINUTES * targetDurationMinutes / PASSIVE_FILL_FACTOR));
         if (fillable < quantity) { quantity = fillable; durationLimited = true; }
       }
       // No volume data for this item at all: leave it unconstrained -- no signal to judge it by.
@@ -194,13 +252,15 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
     // Never dropped for staleness here, unlike a market-wide pick: this item has the player's own
     // track record behind it, so an old last-trade is context, not a reason to withhold it.
     const ageMinutes = priceAgeMinutes(p, now);
-    candidates.push({h, p, net, score, quantity, predictedProfit, cashLimited, durationLimited, limitLimited, ageMinutes});
+    candidates.push({h, p, net, score, quantity, predictedProfit, cashLimited, durationLimited, limitLimited, ageMinutes, stackLimited, shareLimited, personalShareUsed: personalVolumeShare});
   }
   if (!candidates.length) return null;
   candidates.sort((a, b) => b.score - a.score);
-  const {h, p, quantity, predictedProfit, cashLimited, durationLimited, limitLimited, ageMinutes} = candidates[0];
+  const {h, p, quantity, predictedProfit, cashLimited, durationLimited, limitLimited, ageMinutes, stackLimited, shareLimited, personalShareUsed} = candidates[0];
   const notes = [];
   if (cashLimited) notes.push('reduced from your usual size to what your current cash stack can afford');
+  if (stackLimited) notes.push(`reduced so this one trade commits at most `+Math.round(options.maxStackShare*100)+`% of your cash stack`);
+  if (shareLimited) notes.push(`reduced to `+Math.round(personalShareUsed*100)+`% of this item's recent hourly trading, so the order isn't larger than the market absorbs`);
   if (durationLimited) notes.push(`reduced to fit an estimated ~${targetDurationMinutes}-minute trade`);
   if (limitLimited) notes.push('reduced to what EVI has seen left of this item\'s 4-hour GE buy limit');
   if (ageMinutes !== null && ageMinutes > MAX_PRICE_AGE_MINUTES)
@@ -437,6 +497,16 @@ const MIN_HOURLY_VOLUME = 5;
 // (maxSpend) and the target trade duration both still cap the quantity afterwards, so a bigger size
 // is only ever suggested when it is actually affordable and realistically tradeable.
 const DEFAULT_MARKET_QUANTITY_CAP = 100;
+// The share of an item's recent hourly trading a single suggestion may represent, applied unless the
+// caller overrides it (0 turns it off). Chosen by backtest, not by feel: replaying 90 archived days
+// with no cap left 93-94% of committed capital still stuck in unsold stock at the 24-hour horizon,
+// with only 8 completed sales out of 249 positions on a 50m stack. At 10% the same 90 days produced
+// 139 completed sales on a 50m stack and 220 on a 2m one, cutting stuck capital to 29-45% and
+// leaving far less unrealised exposure. Tighter (5%) sells slightly more but earns less per sale;
+// looser (25%) leaves a lot more capital tied up. Sizing an order beyond what an item actually
+// trades is what creates stuck positions, which is the single failure mode behind every loss the
+// backtest found.
+const DEFAULT_MAX_VOLUME_SHARE = 0.10;
 
 // The fallback this tier reaches for only when computeSuggestion above finds nothing eligible in
 // this account's own history: ranks the *entire* item catalogue by current net margin after tax,
@@ -470,6 +540,10 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
   const targetDurationMinutes = Number.isFinite(options.targetDurationMinutes) && options.targetDurationMinutes > 0 ? options.targetDurationMinutes : undefined;
   const now = Number.isFinite(options.now) ? options.now : Date.now();
   const maxPriceAgeMinutes = Number.isFinite(options.maxPriceAgeMinutes) ? options.maxPriceAgeMinutes : MAX_PRICE_AGE_MINUTES;
+  // See the note where this is applied below: off unless the caller asks for it.
+  // Defaults to DEFAULT_MAX_VOLUME_SHARE; an explicit 0 (or a negative) turns the cap off entirely.
+  const volumeShare = Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : DEFAULT_MAX_VOLUME_SHARE;
+  const maxVolumeShare = volumeShare;
   const candidates = [];
   for (const item of mapping) {
     if (!item || !Number.isFinite(item.id) || blocklist.has(item.id)) continue;
@@ -481,7 +555,13 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     if (!p || !(p.low > 0) || !(p.high > 0)) continue;
     const v = volumes?.[String(item.id)];
     const liquidity = Math.min(v?.highPriceVolume || 0, v?.lowPriceVolume || 0);
-    if (liquidity < MIN_HOURLY_VOLUME) continue;
+    // options.minHourlyVolume raises the liquidity floor above the conservative default, for callers
+    // who would rather only see items that clearly trade all day.
+    if (liquidity < Math.max(MIN_HOURLY_VOLUME, options.minHourlyVolume || 0)) continue;
+    // options.taxFreeOnly keeps only items the GE charges no tax on (under 50 gp, or on the
+    // exemption list). Tax took 43% of this account's gross spread over 296 days, so for a small
+    // stack working thin margins it can be the difference between growing and standing still.
+    if (options.taxFreeOnly && estimateUnitTax(item.id, p.high) > 0) continue;
     // No track record backs this tier, so a spread nobody has traded on either side recently is
     // dropped outright rather than ranked (see priceAgeMinutes). Unknown timestamps fail open.
     const ageMinutes = priceAgeMinutes(p, now);
@@ -502,9 +582,28 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     let durationLimited = false;
     if (targetDurationMinutes !== undefined) {
       // liquidity is already known to be > 0 here (the MIN_HOURLY_VOLUME gate above guarantees it).
-      if (estimatedFillMinutes(1, liquidity, VOLUME_WINDOW_MINUTES) > targetDurationMinutes) continue; // not realistic even at quantity 1 within the window
-      const fillable = Math.max(1, Math.floor(liquidity / VOLUME_WINDOW_MINUTES * targetDurationMinutes));
+      // Same corrected estimate, same tolerance on dropping and none on sizing, as computeSuggestion.
+      if (correctedFillMinutes(estimatedFillMinutes(1, liquidity, VOLUME_WINDOW_MINUTES)) > targetDurationMinutes * DURATION_TOLERANCE) continue;
+      const fillable = Math.max(1, Math.floor(liquidity / VOLUME_WINDOW_MINUTES * targetDurationMinutes / PASSIVE_FILL_FACTOR));
       if (fillable < quantity) { quantity = fillable; durationLimited = true; }
+    }
+    // Optional cap on how much of an hour's trading this one order may represent. Off unless the
+    // caller sets it (so nothing changes for anyone who doesn't), and used by tools/backtest.mjs to
+    // test whether over-sizing relative to liquidity is what turns market-wide picks into losses.
+    // Optional cap on how much of the cash stack one suggestion may commit. Also off by default.
+    // Backtesting found this is what turns market-wide picks into large losses: with 50m available,
+    // every catastrophic trade was a single expensive item bought with nearly the whole stack and
+    // still unsold a day later.
+    let stackLimited = false;
+    if (Number.isFinite(options.maxStackShare) && options.maxStackShare > 0 && maxSpend !== undefined) {
+      const affordableByStack = Math.floor(maxSpend * options.maxStackShare / p.low);
+      if (affordableByStack < 1) continue; // one unit already commits more of the stack than allowed
+      if (affordableByStack < quantity) { quantity = affordableByStack; stackLimited = true; }
+    }
+    let shareLimited = false;
+    if (volumeShare > 0) {
+      const affordableByVolume = Math.max(1, Math.floor(liquidity * volumeShare));
+      if (affordableByVolume < quantity) { quantity = affordableByVolume; shareLimited = true; }
     }
     const gated = gateCandidate(item.id, quantity, options);
     if (!gated) continue;
@@ -519,13 +618,22 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     // slow) item would still win the ranking capped down to a quantity of 1, instead of a cheaper
     // or faster-moving item that can be bought and sold for real within the same constraint.
     const constrained = maxSpend !== undefined || targetDurationMinutes !== undefined;
-    const score = (constrained ? predictedProfit : net) * Math.log(liquidity + 1);
+    let score = (constrained ? predictedProfit : net) * Math.log(liquidity + 1);
+    // 'profit-per-hour' ranks by how much the trade is expected to make per hour of waiting, using
+    // the calibrated fill estimate for both sides. It deliberately prefers a small, quick, liquid
+    // flip over a large slow one worth more on paper -- which is what someone with little gp needs,
+    // since their capital being stuck IS the cost. Opt-in via options.rankBy; the default above is
+    // unchanged.
+    if (options.rankBy === 'profit-per-hour') {
+      const hours = Math.max(correctedFillMinutes(estimatedFillMinutes(quantity, liquidity, VOLUME_WINDOW_MINUTES)) * 2, FILL_FLOOR_MINUTES) / 60;
+      score = predictedProfit / hours;
+    }
     if (score <= 0) continue;
-    candidates.push({item, p, net, quantity, predictedProfit, score, cashLimited, durationLimited, limitKnown, fullSize, limitLimited});
+    candidates.push({item, p, net, quantity, predictedProfit, score, cashLimited, durationLimited, limitKnown, fullSize, limitLimited, shareLimited, stackLimited});
   }
   if (!candidates.length) return null;
   candidates.sort((a, b) => b.score - a.score);
-  const {item, p, quantity, predictedProfit, cashLimited, durationLimited, limitKnown, fullSize, limitLimited} = candidates[0];
+  const {item, p, quantity, predictedProfit, cashLimited, durationLimited, limitKnown, fullSize, limitLimited, shareLimited, stackLimited} = candidates[0];
   const notes = [];
   notes.push(limitKnown
     ? `sized to this item's own GE buy limit of ${fullSize.toLocaleString('en-US')} per 4 hours`
@@ -533,6 +641,8 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
   if (cashLimited) notes.push('capped to what your current cash stack can afford');
   if (durationLimited) notes.push(`capped to fit an estimated ~${targetDurationMinutes}-minute trade`);
   if (limitLimited) notes.push('capped to what EVI has seen left of this item\'s 4-hour GE buy limit');
+  if (stackLimited) notes.push(`capped so this one trade commits at most `+Math.round(options.maxStackShare*100)+`% of your cash stack`);
+  if (shareLimited) notes.push(`capped to ${Math.round(maxVolumeShare * 100)}% of this item's recent hourly trading, so the order isn't larger than the market absorbs`);
   return {
     itemId: item.id,
     name: item.name,
@@ -723,6 +833,44 @@ export function marginClearsCushion(marginPerUnit, price, volEstimate, cushionMu
   if (!volEstimate || !(price > 0) || !(marginPerUnit > 0)) return {blocked: false, noiseGp: null};
   const noiseGp = price * volEstimate.windowVol;
   return {blocked: marginPerUnit < noiseGp * cushionMultiplier, noiseGp};
+}
+
+// OSRS allows 8 Grand Exchange offers at once and no more. Until this existed, EVI had no idea how
+// many were in use and would keep suggesting trades with nowhere to put them -- advice that cannot
+// be followed, which is its own kind of wrong answer.
+export const GE_SLOTS = 8;
+
+// Pure decision, from the two counts the plugin sends (see EviLivePlugin's freeSlots and
+// collectableSlots). Both are raw query values, so anything that isn't a whole count -- absent,
+// empty, negative, not a number -- becomes null, meaning "the plugin hasn't established a slot
+// snapshot yet". Unknown never invents a constraint, the same fail-open rule the cash and
+// members-world signals follow.
+//
+//   full  -- every slot is occupied and none of them holds a finished offer. Nothing can be placed
+//            at all, so the caller should stop ranking rather than suggest something unplaceable.
+//   tight -- every slot is occupied, but at least one holds a finished offer (or the finished count
+//            is unknown). Collecting is one click, so ranking continues and the suggestion just
+//            carries a note about it. Deliberately NOT treated as "no room": suppressing a real
+//            signal over a click would hide a trade the player could perfectly well make.
+export function slotCapacity(freeRaw, collectableRaw) {
+  const count = v => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isInteger(n) && n >= 0 && n <= GE_SLOTS ? n : null;
+  };
+  const free = count(freeRaw), collectable = count(collectableRaw);
+  const full = free === 0 && collectable === 0;
+  return {free, collectable, full, tight: free === 0 && !full};
+}
+
+// One sentence to append to a suggestion's reasoning when the GE is tight (see slotCapacity).
+// Returns null when there is nothing to say, so the caller appends nothing.
+export function slotNote(capacity) {
+  if (!capacity || !capacity.tight) return null;
+  const n = capacity.collectable;
+  return n > 0
+    ? `All ${GE_SLOTS} GE slots are in use, but ${n} finished offer${n === 1 ? '' : 's'} can be collected to free one.`
+    : `All ${GE_SLOTS} GE slots are in use -- you will need to collect or cancel an offer before placing this.`;
 }
 
 // A forecast this confident and this negative is treated as "meaningfully unfavorable" by

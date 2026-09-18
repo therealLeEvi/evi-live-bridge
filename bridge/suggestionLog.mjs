@@ -35,5 +35,23 @@ export function createSuggestionLog(dir) {
     } catch { return false; }
     return true;
   }
-  return {record, file};
+  // The most recent entries, read from the tail of the file so this stays cheap however large the
+  // log grows (it is capped at MAX_BYTES, but that is still 50 MB). A partial first line from
+  // landing mid-record is discarded rather than guessed at.
+  function recent(limit = 500) {
+    try {
+      if (!fs.existsSync(file)) return [];
+      const size = fs.statSync(file).size;
+      const want = Math.min(size, 1024 * 1024);
+      const fd = fs.openSync(file, 'r');
+      try {
+        const buffer = Buffer.alloc(want);
+        fs.readSync(fd, buffer, 0, want, size - want);
+        const lines = buffer.toString('utf8').split('\n');
+        if (size > want) lines.shift();
+        return lines.filter(Boolean).slice(-limit).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+      } finally { fs.closeSync(fd); }
+    } catch { return []; }
+  }
+  return {record, recent, file};
 }

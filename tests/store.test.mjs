@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {Store,validatePacket,computeAutoFlips} from '../bridge/store.mjs';
+import {Store,validatePacket,computeAutoFlips,isMarginCheck,MARGIN_CHECK_TICKS} from '../bridge/store.mjs';
 const now=1700000000000;
 function setup(t){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'evi-test-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));return {dir,store:new Store(dir)};}
 function offer(o={}) {return {slot:0,offerId:'buy-1',state:'BUYING',itemId:1,name:'Test rune',price:100,total:10,filled:0,spent:0,knownStart:true,...o};}
@@ -250,4 +250,91 @@ test('buyLimitUsage counts only this account\'s observed buys of this item insid
   assert.equal(store.buyLimitUsage('other-account',1,T0+3600000).used,0);
   assert.equal(store.buyLimitUsage('account-1',1,T0+5*3600000).used,0,'a buy older than four hours has left the window');
   assert.equal(usage.windowEndsAt,T0+4*3600000);
+});
+
+test('imported flips rank suggestions but never change the observed-profit total',t=>{
+  const {store,dir}=setup(t);
+  at(store,packet(1,[offer({offerId:'buy-1'})],{ts:T0}));
+  at(store,packet(2,[offer({offerId:'buy-1',state:'BOUGHT',filled:10,spent:1000})],{ts:T0+1000}));
+  const before=store.state(T0+2000);
+  const flip=(o={})=>({fp:'copilot|whip|1',itemId:4151,item:'Abyssal whip',quantity:2,capital:2000000,profit:150000,firstBuy:T0-86400000,lastSell:T0-80000000,account:'le evi',...o});
+  const r=store.importFlips({source:'copilot',flips:[flip(),flip({fp:'copilot|nails|1',itemId:1,item:'Rune nails',quantity:100,capital:10000,profit:2000})]});
+  assert.equal(r.accepted,2);
+  const s=store.state(T0+3000);
+  assert.equal(s.importedFlips.length,2);
+  assert.equal(s.netProfit,before.netProfit,'the observed-profit total must not move');
+  assert.equal(s.tradeCount,before.tradeCount,'nor the observed trade count');
+  assert.equal(s.importedSummary.count,2);
+  assert.equal(s.importedSummary.profit,152000);
+  assert.equal(s.importedSummary.items,2);
+  // Re-importing the same file is a no-op, across a restart too.
+  assert.deepEqual(store.importFlips({source:'copilot',flips:[flip()]}),{accepted:0,duplicates:1,total:2});
+  const reopened=new Store(dir).state(T0+4000);
+  assert.equal(reopened.importedFlips.length,2,'imports survive a bridge restart');
+  assert.equal(reopened.importedFlips[0].netProceeds,2150000,'netProceeds is derived from capital + profit');
+  assert.ok(reopened.importedFlips[0].hold>0);
+  // Undo: an import the player regrets can be dropped by source, and survives a restart.
+  assert.deepEqual(store.importFlips({source:'copilot',remove:true}),{removed:2,total:0});
+  assert.equal(store.state(T0+5000).importedFlips.length,0);
+  assert.equal(new Store(dir).state(T0+6000).importedFlips.length,0);
+  assert.equal(store.importFlips({source:'copilot',flips:[flip()]}).accepted,1,'after an undo the same file can be imported again');
+});
+test('importFlips rejects malformed rows rather than storing half-understood trades',t=>{
+  const {store}=setup(t);
+  const good={fp:'a',itemId:1,item:'Rune nails',quantity:10,capital:100,profit:50,firstBuy:T0,lastSell:T0+1000};
+  assert.throws(()=>store.importFlips({source:'',flips:[good]}),/Name the import source/);
+  assert.throws(()=>store.importFlips({source:'copilot',flips:[]}),/between 1 and 500/);
+  assert.throws(()=>store.importFlips({source:'copilot',flips:[{...good,itemId:0}]}),/resolved itemId/,'an unresolved item name must never be stored as item 0');
+  assert.throws(()=>store.importFlips({source:'copilot',flips:[{...good,fp:''}]}),/fingerprint/);
+  assert.throws(()=>store.importFlips({source:'copilot',flips:[{...good,profit:1.5}]}),/quantity, capital or profit/);
+  assert.throws(()=>store.importFlips({source:'copilot',flips:[{...good,lastSell:0}]}),/timestamps/);
+  assert.equal(store.state().importedFlips.length,0);
+});
+
+// ---- Margin checks: the one-item probe used to discover a real spread. Not a trade. ----
+const probe=(o={})=>({slot:0,offerId:'probe-1',state:'BOUGHT',itemId:1,name:'Test rune',price:200,total:1,filled:1,spent:200,knownStart:true,ticksToFill:1,...o});
+test('a one-item offer that filled within a couple of ticks is a margin check; anything else is not',()=>{
+  assert.equal(isMarginCheck(probe()),true);
+  assert.equal(isMarginCheck(probe({ticksToFill:0})),true);
+  assert.equal(isMarginCheck(probe({ticksToFill:MARGIN_CHECK_TICKS})),true);
+  assert.equal(isMarginCheck(probe({ticksToFill:MARGIN_CHECK_TICKS+1})),false,'a slower fill is a real trade');
+  assert.equal(isMarginCheck(probe({ticksToFill:-1})),false,'unknown must never be treated as a probe');
+  assert.equal(isMarginCheck(probe({ticksToFill:undefined})),false,'an older plugin that sends nothing must not have its trades deleted');
+  assert.equal(isMarginCheck(probe({total:2,filled:2})),false,'two items is a trade, however fast');
+  assert.equal(isMarginCheck(probe({filled:0})),false);
+  assert.equal(isMarginCheck(null),false);
+});
+test('margin checks never become flips or open positions, and the real trade around them still matches',t=>{
+  const {store}=setup(t);
+  // A probe: buy 1 high, sell 1 low, both instant. Then a real 10-item flip of the same item.
+  at(store,packet(1,[probe({offerId:'probe-buy',state:'BUYING',filled:0,spent:0,ticksToFill:-1})],{ts:T0}));
+  at(store,packet(2,[probe({offerId:'probe-buy',price:200,spent:200})],{ts:T0+1000}));
+  at(store,packet(3,[probe({offerId:'probe-buy',price:200,spent:200}),probe({slot:1,offerId:'probe-sell',state:'SOLD',price:100,spent:100})],{ts:T0+2000}));
+  at(store,packet(4,[offer({offerId:'real-buy',state:'BOUGHT',total:10,filled:10,spent:1000,ticksToFill:50})],{ts:T0+3000}));
+  at(store,packet(5,[offer({offerId:'real-buy',state:'BOUGHT',total:10,filled:10,spent:1000,ticksToFill:50}),
+    offer({slot:1,offerId:'real-sell',state:'SOLD',price:130,total:10,filled:10,spent:1300,ticksToFill:80})],{ts:T0+4000}));
+  const s=store.state(T0+5000);
+  assert.equal(s.autoFlips.length,1,'only the real 10-item flip counts');
+  assert.equal(s.autoFlips[0].quantity,10);
+  assert.equal(s.autoOpenPositions.length,0,'the probe must not leave a phantom open position');
+  const probes=s.completed.filter(o=>o.marginCheck);
+  assert.equal(probes.length,2,'both sides of the probe are still visible, just labelled');
+  assert.ok(s.completed.some(o=>o.offerId==='real-buy'&&!o.marginCheck));
+});
+test('an offer with no tick information is still matched exactly as before',t=>{
+  const {store}=setup(t);
+  at(store,packet(1,[offer({offerId:'b',state:'BOUGHT',total:1,filled:1,spent:100})],{ts:T0}));
+  at(store,packet(2,[offer({offerId:'b',state:'BOUGHT',total:1,filled:1,spent:100}),
+    offer({slot:1,offerId:'s',state:'SOLD',price:130,total:1,filled:1,spent:130})],{ts:T0+1000}));
+  const s=store.state(T0+2000);
+  assert.equal(s.autoFlips.length,1,'without ticks, a one-item flip is a normal trade');
+  assert.equal(s.completed.every(o=>o.marginCheck===false),true);
+});
+test('validatePacket accepts the optional tick field, rejects nonsense, and defaults it to unknown',()=>{
+  const withTicks=validatePacket(packet(1,[offer({ticksToFill:7})]));
+  assert.equal(withTicks.offers.find(o=>o.offerId==='buy-1').ticksToFill,7);
+  const without=validatePacket(packet(1,[offer()]));
+  assert.equal(without.offers.find(o=>o.offerId==='buy-1').ticksToFill,-1,'older plugins simply do not send it');
+  assert.throws(()=>validatePacket(packet(1,[offer({ticksToFill:1.5})])),/ticksToFill/);
+  assert.throws(()=>validatePacket(packet(1,[offer({ticksToFill:-5})])),/ticksToFill/);
 });

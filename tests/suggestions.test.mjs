@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {personalHistory, computeSuggestion, computeMarketSuggestion, computeHoldingSuggestion, computeInventorySuggestion, computePushedSuggestion, pickPersistentOpenPosition, lookupItemPrice, forecastFromSeries, timestepForHorizon, UNFAVORABLE_FORECAST_CONFIDENCE, decideForecast, pickWithForecast, estimateOfferFill, estimateVolatility, marginClearsCushion, MARGIN_CUSHION_MULTIPLIER, breakEvenSellPrice, priceAgeMinutes, MAX_PRICE_AGE_MINUTES} from '../bridge/suggestions.mjs';
+import {personalHistory, computeSuggestion, computeMarketSuggestion, computeHoldingSuggestion, computeInventorySuggestion, computePushedSuggestion, pickPersistentOpenPosition, lookupItemPrice, forecastFromSeries, timestepForHorizon, UNFAVORABLE_FORECAST_CONFIDENCE, decideForecast, pickWithForecast, estimateOfferFill, estimateVolatility, marginClearsCushion, MARGIN_CUSHION_MULTIPLIER, breakEvenSellPrice, priceAgeMinutes, MAX_PRICE_AGE_MINUTES, slotCapacity, slotNote, GE_SLOTS} from '../bridge/suggestions.mjs';
 
 const now = 1700000000000;
 function flip(o = {}) {
@@ -312,8 +312,11 @@ test('duration: enough recent volume leaves quantity unchanged and unflagged', (
 test('duration: thin recent volume caps the suggested quantity', () => {
   const flips = [flip(), flip({quantity: 200})]; // median qty 150
   const vols = volumes({'1': {highPriceVolume: 100, lowPriceVolume: 100}}); // 100/hr = ~1.67/min
-  const s = computeSuggestion(flips, prices(), now, {targetDurationMinutes: 10, volumes: vols});
-  assert.equal(s.quantity, 16); // floor(100/60*10)
+  // The volume-share cap is opted out of here so this stays a test of the duration cap alone.
+  const s = computeSuggestion(flips, prices(), now, {targetDurationMinutes: 10, volumes: vols, maxVolumeShare: 0});
+  // Sizing now divides by the measured passive-offer factor (see PASSIVE_FILL_FACTOR): a passive
+  // offer takes about 1.5x longer than raw volume suggests, so fewer units fit the same window.
+  assert.equal(s.quantity, 11); // floor(100/60*10 / 1.5)
   assert.match(s.reasoning, /reduced to fit an estimated ~10-minute trade/);
 });
 
@@ -351,8 +354,12 @@ test('market: targetDurationMinutes switches ranking to total achievable profit,
   const vols = {'3': {highPriceVolume: 20, lowPriceVolume: 20}, '4': {highPriceVolume: 6000, lowPriceVolume: 6000}};
   const unconstrained = computeMarketSuggestion(items, p, vols);
   assert.equal(unconstrained.itemId, 3); // per-unit margin alone favors the expensive item
-  const constrained = computeMarketSuggestion(items, p, vols, {targetDurationMinutes: 3});
-  // At a 3-minute target: item 3's thin volume (20/hr) only realistically moves 1 unit
+  // 8 minutes rather than 3: no passive offer fills in under FILL_FLOOR_MINUTES x
+  // PASSIVE_FILL_FACTOR (7.5 min), so a 3-minute target now correctly leaves nothing at all.
+  const constrained = computeMarketSuggestion(items, p, vols, {targetDurationMinutes: 8});
+  assert.equal(computeMarketSuggestion(items, p, vols, {targetDurationMinutes: 3}), null,
+    'a target no passive offer could ever meet must return nothing, not a fake candidate');
+  // At an 8-minute target: item 3's thin volume (20/hr) only realistically moves 1 unit
   // (~274,000gp); item 4's deep volume (6000/hr) still moves its full quantity of 100 (~382,000gp)
   // and wins on total achievable profit.
   assert.equal(constrained.itemId, 4);
@@ -405,14 +412,14 @@ test('market: a margin that cannot clear estimated tax is not suggested', () => 
 // 500k minimum predicted profit unreachable for exactly the high-volume, thinner-margin items that
 // get there through quantity. Cash stack and trade duration still cap the size afterwards.
 test('market: quantity is the item\'s own GE buy limit when the limit is known', () => {
-  const s = computeMarketSuggestion(mapping(), prices(), volumes());
+  const s = computeMarketSuggestion(mapping(), prices(), volumes(), {maxVolumeShare: 0}); // the volume cap is tested separately
   assert.equal(s.quantity, 10000); // Rune nails' own limit
   assert.match(s.reasoning, /sized to this item's own GE buy limit of 10,000 per 4 hours/);
 });
 
 test('market: an unknown GE buy limit falls back to the small default cap, and says so', () => {
   const items = [{id: 3, name: 'No limit listed'}];
-  const s = computeMarketSuggestion(items, prices({'3': {high: 1130, low: 1000}}), volumes({'3': {highPriceVolume: 50, lowPriceVolume: 50}}));
+  const s = computeMarketSuggestion(items, prices({'3': {high: 1130, low: 1000}}), volumes({'3': {highPriceVolume: 50, lowPriceVolume: 50}}), {maxVolumeShare: 0});
   assert.equal(s.itemId, 3);
   assert.equal(s.quantity, 100);
   assert.match(s.reasoning, /GE buy limit is unknown/);
@@ -422,7 +429,7 @@ test('market: quantity uses the GE buy limit when it is below the default cap', 
   const items = mapping([{id: 3, name: 'Dragon dagger', limit: 8}]);
   const withDagger = prices({'3': {high: 15000, low: 14000}});
   const vols = volumes({'3': {highPriceVolume: 50, lowPriceVolume: 50}});
-  const s = computeMarketSuggestion(items, withDagger, vols, {blocklist: new Set([1, 2])});
+  const s = computeMarketSuggestion(items, withDagger, vols, {blocklist: new Set([1, 2]), maxVolumeShare: 0});
   assert.equal(s.itemId, 3);
   assert.equal(s.quantity, 8);
 });
@@ -431,7 +438,7 @@ test('market: an unknown GE buy limit falls back to the default cap, not an unbo
   const items = mapping([{id: 3, name: 'No-limit item'}]); // no "limit" field at all
   const withItem = prices({'3': {high: 130, low: 100}});
   const vols = volumes({'3': {highPriceVolume: 50, lowPriceVolume: 50}});
-  const s = computeMarketSuggestion(items, withItem, vols, {blocklist: new Set([1, 2])});
+  const s = computeMarketSuggestion(items, withItem, vols, {blocklist: new Set([1, 2]), maxVolumeShare: 0});
   assert.equal(s.itemId, 3);
   assert.equal(s.quantity, 100);
 });
@@ -446,9 +453,9 @@ test('market: blocklist excludes an item even when it would otherwise win', () =
 
 test('market: minProfit filters out a candidate below the predicted-profit floor', () => {
   // net margin 28gp/unit * quantity 10,000 (Rune nails' buy limit) = 280,000 predicted profit
-  const below = computeMarketSuggestion(mapping(), prices(), volumes(), {minProfit: 300000, blocklist: new Set([2])});
+  const below = computeMarketSuggestion(mapping(), prices(), volumes(), {minProfit: 300000, blocklist: new Set([2]), maxVolumeShare: 0});
   assert.equal(below, null);
-  const above = computeMarketSuggestion(mapping(), prices(), volumes(), {minProfit: 200000, blocklist: new Set([2])});
+  const above = computeMarketSuggestion(mapping(), prices(), volumes(), {minProfit: 200000, blocklist: new Set([2]), maxVolumeShare: 0});
   assert.equal(above.itemId, 1);
 });
 
@@ -483,9 +490,9 @@ test('market: maxSpend switches ranking to total achievable profit, not just per
   const p = prices({'3': {high: 1300000, low: 1000000}, '4': {high: 8000, low: 5000}});
   const vols = volumes({'3': {highPriceVolume: 20, lowPriceVolume: 20}, '4': {highPriceVolume: 20, lowPriceVolume: 20}});
   const blocklist = new Set([1, 2]);
-  const unconstrained = computeMarketSuggestion(items, p, vols, {blocklist});
+  const unconstrained = computeMarketSuggestion(items, p, vols, {blocklist, maxVolumeShare: 0});
   assert.equal(unconstrained.itemId, 3); // per-unit margin alone favors the expensive item
-  const constrained = computeMarketSuggestion(items, p, vols, {blocklist, maxSpend: 1200000});
+  const constrained = computeMarketSuggestion(items, p, vols, {blocklist, maxSpend: 1200000, maxVolumeShare: 0});
   // With only 1.2m gp: the expensive item is capped to quantity 1 (~274,000gp predicted profit);
   // the cheap item still fits its full quantity of 100 (~284,000gp) and wins on total profit.
   assert.equal(constrained.itemId, 4);
@@ -494,7 +501,7 @@ test('market: maxSpend switches ranking to total achievable profit, not just per
 });
 
 test('market: a maxSpend big enough to afford the full quantity leaves it unchanged and unflagged', () => {
-  const s = computeMarketSuggestion(mapping(), prices(), volumes(), {maxSpend: 1000000}); // exactly 10,000 units at 100 gp
+  const s = computeMarketSuggestion(mapping(), prices(), volumes(), {maxSpend: 1000000, maxVolumeShare: 0}); // exactly 10,000 units at 100 gp
   assert.equal(s.itemId, 1);
   assert.equal(s.quantity, 10000);
   assert.doesNotMatch(s.reasoning, /capped to what your current cash stack/);
@@ -882,20 +889,21 @@ test('estimateOfferFill: no remaining quantity, no target duration, or no volume
 });
 
 test('estimateOfferFill: a fast-trading item well within the target duration is marked on pace', () => {
-  // liquidity = min(1200, 1000) = 1000/hour; 100 remaining -> 100*60/1000 = 6 minutes to trade
+  // liquidity = min(1200, 1000) = 1000/hour; 100 remaining -> 6 minutes raw, x1.5 for a passive
+  // offer = 9 (see PASSIVE_FILL_FACTOR, measured against real offers)
   const fill = estimateOfferFill(100, {highPriceVolume: 1200, lowPriceVolume: 1000}, 360);
-  assert.deepEqual(fill, {estimatedFillMinutes: 6, likelyToFillInTime: true});
+  assert.deepEqual(fill, {estimatedFillMinutes: 9, likelyToFillInTime: true});
 });
 
 test('estimateOfferFill: a slow-trading item well past the target duration is flagged, with a rounded real estimate', () => {
-  // liquidity = min(2000, 1000) = 1000/hour; 100000 remaining -> 100000*60/1000 = 6000 minutes
+  // liquidity = min(2000, 1000) = 1000/hour; 100000 remaining -> 6000 minutes raw, 9000 corrected
   const fill = estimateOfferFill(100000, {highPriceVolume: 2000, lowPriceVolume: 1000}, 360);
-  assert.deepEqual(fill, {estimatedFillMinutes: 6000, likelyToFillInTime: false});
+  assert.deepEqual(fill, {estimatedFillMinutes: 9000, likelyToFillInTime: false});
 });
 
 test('estimateOfferFill: exactly at the target duration counts as on pace (<=), not flagged', () => {
-  // liquidity = 60/hour; 60 remaining -> 60*60/60 = 60 minutes, target is also 60
-  const fill = estimateOfferFill(60, {highPriceVolume: 60, lowPriceVolume: 60}, 60);
+  // liquidity = 60/hour; 40 remaining -> 40 minutes raw, x1.5 = exactly the 60-minute target
+  const fill = estimateOfferFill(40, {highPriceVolume: 60, lowPriceVolume: 60}, 60);
   assert.deepEqual(fill, {estimatedFillMinutes: 60, likelyToFillInTime: true});
 });
 
@@ -984,7 +992,7 @@ test('members-only items are not suggested on a free-to-play world, in any tier'
 
 test('buy limit: quantity is reduced to what is left of the 4-hour limit, and an exhausted limit is skipped', () => {
   const limitFor = id => id === 1 ? {limit: 10000, remaining: 250} : null;
-  const m = computeMarketSuggestion(mapping(), fresh(), volumes(), {limitFor, blocklist: new Set([2])});
+  const m = computeMarketSuggestion(mapping(), fresh(), volumes(), {limitFor, blocklist: new Set([2]), maxVolumeShare: 0});
   assert.equal(m.quantity, 250);
   assert.match(m.reasoning, /left of this item's 4-hour GE buy limit/);
   const tighter = id => id === 1 ? {limit: 10000, remaining: 100} : null; // below the usual size of 150
@@ -992,9 +1000,134 @@ test('buy limit: quantity is reduced to what is left of the 4-hour limit, and an
   assert.equal(p.quantity, 100);
   assert.match(p.reasoning, /left of this item's 4-hour GE buy limit/);
   const used = id => ({limit: 10000, remaining: 0});
-  assert.equal(computeMarketSuggestion(mapping(), fresh(), volumes(), {limitFor: used, blocklist: new Set([2])}), null);
+  assert.equal(computeMarketSuggestion(mapping(), fresh(), volumes(), {limitFor: used, blocklist: new Set([2]), maxVolumeShare: 0}), null);
   assert.equal(computeSuggestion(proven(), fresh(), Date.now(), {limitFor: used}), null);
   assert.equal(computePushedSuggestion([{itemId: 1, name: 'x', buy: 100, sell: 130, net: 28, qty: 5000, score: 9}], {limitFor}).quantity, 250);
-  assert.equal(computeMarketSuggestion(mapping(), fresh(), volumes(), {limitFor: () => null, blocklist: new Set([2])}).quantity, 10000,
+  assert.equal(computeMarketSuggestion(mapping(), fresh(), volumes(), {limitFor: () => null, blocklist: new Set([2]), maxVolumeShare: 0}).quantity, 10000,
     'an unknown limit must not constrain anything');
+});
+
+// -- maxStackShare: how much of the cash stack one market-wide suggestion may commit. Added after a
+// 90-day backtest found uncapped sizing, not item choice, was what turned this tier into a loss. --
+
+test('market: maxStackShare caps one trade to a share of the cash stack, and says so', () => {
+  const s = computeMarketSuggestion(mapping(), fresh(), volumes(), {maxSpend: 1000000, maxStackShare: 0.25, blocklist: new Set([2]), maxVolumeShare: 0});
+  assert.equal(s.quantity, 2500, 'floor(1,000,000 * 0.25 / 100 gp per unit)');
+  assert.match(s.reasoning, /at most 25% of your cash stack/);
+});
+
+test('market: an item too expensive to buy even one unit within the share is skipped, not shrunk to one', () => {
+  const pricey = fresh({'3': {high: 900000, low: 800000, highTime: FRESH, lowTime: FRESH}});
+  const items = mapping([{id: 3, name: 'Expensive thing', limit: 8}]);
+  const vols = volumes({'3': {highPriceVolume: 50, lowPriceVolume: 50}});
+  // 25% of a 1m stack is 250k, less than one 800k unit.
+  const s = computeMarketSuggestion(items, pricey, vols, {maxSpend: 1000000, maxStackShare: 0.25, blocklist: new Set([1, 2])});
+  assert.equal(s, null);
+  // Without the cap the same stack affords one unit.
+  assert.equal(computeMarketSuggestion(items, pricey, vols, {maxSpend: 1000000, blocklist: new Set([1, 2])}).quantity, 1);
+});
+
+test('market: no maxStackShare leaves sizing exactly as before', () => {
+  const capped = computeMarketSuggestion(mapping(), fresh(), volumes(), {maxSpend: 1000000, maxStackShare: 0.25, blocklist: new Set([2]), maxVolumeShare: 0});
+  const uncapped = computeMarketSuggestion(mapping(), fresh(), volumes(), {maxSpend: 1000000, blocklist: new Set([2]), maxVolumeShare: 0});
+  assert.equal(uncapped.quantity, 10000);
+  assert.ok(capped.quantity < uncapped.quantity);
+  assert.doesNotMatch(uncapped.reasoning, /of your cash stack/);
+});
+
+test('market: maxVolumeShare caps a trade to a share of recent hourly trading', () => {
+  // 500/hour on the thin side, 5% = 25 units.
+  const s = computeMarketSuggestion(mapping(), fresh(), volumes(), {maxVolumeShare: 0.05, blocklist: new Set([2])});
+  assert.equal(s.quantity, 25);
+  assert.match(s.reasoning, /5% of this item's recent hourly trading/);
+});
+
+// -- taxFreeOnly / the Starter profile: market-wide picks restricted to items the GE charges no tax
+// on. Backtested as a large improvement in completion and risk for a small stack. --
+
+test('market: taxFreeOnly keeps only items the GE charges no tax on', () => {
+  // Item 1 (130 gp) is taxed; item 3 priced under 50 gp is not, and 1755 is on the exemption list.
+  const items = mapping([{id: 3, name: 'Cheap bulk item', limit: 10000}, {id: 1755, name: 'Chef\'s hat', limit: 100}]);
+  // Item 1 has the best margin (28 after tax), so it wins on merit until the filter excludes it.
+  const p = prices({'3': {high: 40, low: 30, highTime: FRESH, lowTime: FRESH}, '1755': {high: 105, low: 100, highTime: FRESH, lowTime: FRESH}});
+  const vols = volumes({'3': {highPriceVolume: 5000, lowPriceVolume: 5000}, '1755': {highPriceVolume: 500, lowPriceVolume: 500}});
+  const taxed = computeMarketSuggestion(items, p, vols, {maxVolumeShare: 0});
+  assert.equal(taxed.itemId, 1, 'without the filter the taxed item still wins on margin');
+  const free = computeMarketSuggestion(items, p, vols, {taxFreeOnly: true, maxVolumeShare: 0});
+  assert.ok(free.itemId === 3 || free.itemId === 1755, 'with it, only untaxed items remain: ' + free.itemId);
+  const onlyTaxed = computeMarketSuggestion(mapping(), prices(), volumes(), {taxFreeOnly: true, maxVolumeShare: 0});
+  assert.equal(onlyTaxed, null, 'when every candidate is taxed, nothing is suggested rather than something taxed');
+});
+
+test('market: minHourlyVolume raises the liquidity floor without touching the default', () => {
+  const thin = volumes({'1': {highPriceVolume: 50, lowPriceVolume: 50}});
+  assert.equal(computeMarketSuggestion(mapping(), fresh(), thin, {blocklist: new Set([2]), maxVolumeShare: 0}).itemId, 1);
+  assert.equal(computeMarketSuggestion(mapping(), fresh(), thin, {blocklist: new Set([2]), minHourlyVolume: 100, maxVolumeShare: 0}), null);
+});
+
+test('market: the default volume-share cap is applied unless a caller opts out', () => {
+  // volumes() is 500/hour, so the 10% default allows 50 units of Rune nails' 10,000 limit.
+  const capped = computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2])});
+  assert.equal(capped.quantity, 50);
+  assert.match(capped.reasoning, /10% of this item's recent hourly trading/);
+  assert.equal(computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2]), maxVolumeShare: 0}).quantity, 10000);
+});
+
+test('personal history: maxStackShare caps a proven flip the same way, and drops what one unit would overcommit', () => {
+  const capped = computeSuggestion(proven(), fresh(), Date.now(), {maxSpend: 1000000, maxStackShare: 0.25});
+  assert.equal(capped.quantity, 150, 'the usual size already fits inside a quarter of the stack');
+  const tight = computeSuggestion(proven(), fresh(), Date.now(), {maxSpend: 40000, maxStackShare: 0.25});
+  assert.equal(tight.quantity, 100, 'floor(40,000 * 0.25 / 100 gp)');
+  assert.match(tight.reasoning, /at most 25% of your cash stack/);
+  assert.equal(computeSuggestion(proven(), fresh(), Date.now(), {maxSpend: 300, maxStackShare: 0.25}), null,
+    'one unit would commit more than the allowed share, so the candidate is skipped');
+});
+
+test('personal history: the volume-share cap applies here too, so a proven item is not over-ordered', () => {
+  const flips = [flip(), flip({quantity: 200})]; // usual size 150
+  const vols = volumes({'1': {highPriceVolume: 300, lowPriceVolume: 300}}); // 10% of 300 = 30
+  const s = computeSuggestion(flips, fresh(), Date.now(), {volumes: vols});
+  assert.equal(s.quantity, 30);
+  assert.match(s.reasoning, /10% of this item's recent hourly trading/);
+  // Opting out restores the old sizing, and no volume data at all never constrains anything.
+  assert.equal(computeSuggestion(flips, fresh(), Date.now(), {volumes: vols, maxVolumeShare: 0}).quantity, 150);
+  assert.equal(computeSuggestion(flips, fresh(), Date.now(), {}).quantity, 150);
+});
+
+
+// --- Grand Exchange slot capacity (8 offers, no more) ---
+
+test('slot capacity: a free slot means no constraint at all', () => {
+  const c = slotCapacity('3', '1');
+  assert.deepEqual(c, {free: 3, collectable: 1, full: false, tight: false});
+  assert.equal(slotNote(c), null);
+});
+
+test('slot capacity: all eight in use with nothing collectable is full', () => {
+  const c = slotCapacity('0', '0');
+  assert.equal(c.full, true);
+  assert.equal(c.tight, false);
+  // Nothing to append: the caller stops ranking entirely and says so on its own.
+  assert.equal(slotNote(c), null);
+});
+
+test('slot capacity: all eight in use but something finished is tight, not full', () => {
+  const c = slotCapacity('0', '2');
+  assert.equal(c.full, false, 'collecting is one click -- a real suggestion must not be suppressed over it');
+  assert.equal(c.tight, true);
+  assert.match(slotNote(c), /2 finished offers can be collected/);
+  assert.match(slotNote(slotCapacity('0', '1')), /1 finished offer can be collected/);
+});
+
+test('slot capacity: an unknown count never invents a constraint', () => {
+  for (const [free, collectable] of [[null, null], [undefined, undefined], ['', ''], ['x', '2'], ['-1', '0'], ['9', '0']]) {
+    const c = slotCapacity(free, collectable);
+    assert.equal(c.full, false, `${free}/${collectable} must not read as a full Grand Exchange`);
+  }
+  // Slots known full, finished count unknown: still not suppressed, but the note says why.
+  const partial = slotCapacity('0', null);
+  assert.equal(partial.full, false);
+  assert.equal(partial.tight, true);
+  assert.match(slotNote(partial), /collect or cancel an offer/);
+  assert.equal(GE_SLOTS, 8);
 });

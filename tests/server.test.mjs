@@ -37,6 +37,13 @@ test('loopback bridge protects personal scanner, API, origins, keys and static p
   assert.equal((await get('/api/suggestion/not-held',{method:'POST',headers:{...headers,Authorization:'Bearer '+app.secrets.plugin},body:JSON.stringify({buyId:'no-such-buy'})})).status,400);
   // The scanner's own close endpoint stays scanner-gated (UI origin + unlocked cookie).
   assert.equal((await get('/api/positions/close',{method:'POST',headers,body:'{}'})).status,401);
+  // EVI's own scorecard: scanner-gated like every other view of the player's data.
+  assert.equal((await get('/api/suggestion-outcomes')).status,401);
+  const scored=await get('/api/suggestion-outcomes',{headers:{Cookie:cookie}});
+  assert.equal(scored.status,200);
+  const scoredBody=await scored.json();
+  assert.equal(scoredBody.summary.shown,0,'a fresh bridge has nothing to score yet');
+  assert.deepEqual(scoredBody.recent,[]);
   assert.equal((await get('/data/keys.json',{headers:{Cookie:cookie}})).status,404);
   assert.equal((await get('/api/market/anything?url=https://evil.example',{headers:{Cookie:cookie}})).status,404);
   // The browser scanner is optional: the bridge is published and usable on its own (the RuneLite

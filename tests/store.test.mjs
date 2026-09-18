@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {Store,validatePacket,computeAutoFlips,isMarginCheck,MARGIN_CHECK_TICKS} from '../bridge/store.mjs';
+import {Store,validatePacket,computeAutoFlips,isMarginCheck,MARGIN_CHECK_TICKS,availableAt,dataHealthOf} from '../bridge/store.mjs';
 const now=1700000000000;
 function setup(t){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'evi-test-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));return {dir,store:new Store(dir)};}
 function offer(o={}) {return {slot:0,offerId:'buy-1',state:'BUYING',itemId:1,name:'Test rune',price:100,total:10,filled:0,spent:0,knownStart:true,...o};}
@@ -292,11 +292,14 @@ test('importFlips rejects malformed rows rather than storing half-understood tra
 });
 
 // ---- Margin checks: the one-item probe used to discover a real spread. Not a trade. ----
-const probe=(o={})=>({slot:0,offerId:'probe-1',state:'BOUGHT',itemId:1,name:'Test rune',price:200,total:1,filled:1,spent:200,knownStart:true,ticksToFill:1,...o});
-test('a one-item offer that filled within a couple of ticks is a margin check; anything else is not',()=>{
+// A real probe is priced deliberately off-market, so the GE fills it at a BETTER price than it asked:
+// this one offered 250 to buy and paid 200.
+const probe=(o={})=>({slot:0,offerId:'probe-1',state:'BOUGHT',itemId:1,name:'Test rune',price:250,total:1,filled:1,spent:200,knownStart:true,ticksToFill:1,...o});
+test('a one-item offer that filled within a couple of ticks at a better price than asked is a margin check; anything else is not',()=>{
   assert.equal(isMarginCheck(probe()),true);
   assert.equal(isMarginCheck(probe({ticksToFill:0})),true);
   assert.equal(isMarginCheck(probe({ticksToFill:MARGIN_CHECK_TICKS})),true);
+  assert.equal(isMarginCheck(probe({state:'SOLD',price:100,spent:180})),true,'a probe sell asks low and is paid more');
   assert.equal(isMarginCheck(probe({ticksToFill:MARGIN_CHECK_TICKS+1})),false,'a slower fill is a real trade');
   assert.equal(isMarginCheck(probe({ticksToFill:-1})),false,'unknown must never be treated as a probe');
   assert.equal(isMarginCheck(probe({ticksToFill:undefined})),false,'an older plugin that sends nothing must not have its trades deleted');
@@ -304,12 +307,24 @@ test('a one-item offer that filled within a couple of ticks is a margin check; a
   assert.equal(isMarginCheck(probe({filled:0})),false);
   assert.equal(isMarginCheck(null),false);
 });
+test('a real one-item sale that fills instantly at its own asking price is a trade, not a probe',()=>{
+  // Reported from the live client: an Eclipse Moon chestplate (broken) sold at 595,350 into a waiting
+  // buyer and filled in 1 tick. The old speed-only rule called it a probe, which erased a real
+  // -11,907 loss and left the journal believing the chestplate was still held -- so EVI suggested
+  // selling it again after it had been sold.
+  const chestplate={offerId:'s',state:'SOLD',itemId:29049,name:'Eclipse Moon chestplate (broken)',price:595350,total:1,filled:1,spent:595350,ticksToFill:1};
+  assert.equal(isMarginCheck(chestplate),false,'filled at exactly its asking price: nothing about it looks like a probe');
+  assert.equal(isMarginCheck({...chestplate,state:'BOUGHT'}),false,'the same holds for a buy');
+  assert.equal(isMarginCheck({...chestplate,spent:595300}),false,'a sell paid LESS than asked is not price improvement either');
+});
 test('margin checks never become flips or open positions, and the real trade around them still matches',t=>{
   const {store}=setup(t);
   // A probe: buy 1 high, sell 1 low, both instant. Then a real 10-item flip of the same item.
   at(store,packet(1,[probe({offerId:'probe-buy',state:'BUYING',filled:0,spent:0,ticksToFill:-1})],{ts:T0}));
-  at(store,packet(2,[probe({offerId:'probe-buy',price:200,spent:200})],{ts:T0+1000}));
-  at(store,packet(3,[probe({offerId:'probe-buy',price:200,spent:200}),probe({slot:1,offerId:'probe-sell',state:'SOLD',price:100,spent:100})],{ts:T0+2000}));
+  // Offered 250 to buy and paid 200; asked 100 to sell and was paid 180 -- priced off-market on
+  // purpose, and filled at the better price, exactly as a real probe is.
+  at(store,packet(2,[probe({offerId:'probe-buy',price:250,spent:200})],{ts:T0+1000}));
+  at(store,packet(3,[probe({offerId:'probe-buy',price:250,spent:200}),probe({slot:1,offerId:'probe-sell',state:'SOLD',price:100,spent:180})],{ts:T0+2000}));
   at(store,packet(4,[offer({offerId:'real-buy',state:'BOUGHT',total:10,filled:10,spent:1000,ticksToFill:50})],{ts:T0+3000}));
   at(store,packet(5,[offer({offerId:'real-buy',state:'BOUGHT',total:10,filled:10,spent:1000,ticksToFill:50}),
     offer({slot:1,offerId:'real-sell',state:'SOLD',price:130,total:10,filled:10,spent:1300,ticksToFill:80})],{ts:T0+4000}));
@@ -320,6 +335,45 @@ test('margin checks never become flips or open positions, and the real trade aro
   const probes=s.completed.filter(o=>o.marginCheck);
   assert.equal(probes.length,2,'both sides of the probe are still visible, just labelled');
   assert.ok(s.completed.some(o=>o.offerId==='real-buy'&&!o.marginCheck));
+});
+test('items collected from a still-open buy and sold before it finishes still match that buy',()=>{
+  // The real sequence, from the live client: buy 3 placed, 1 fills after 114 ticks, the player
+  // collects and sells it, and only THEN cancels the other 2. The buy offer finishes after the sale,
+  // so ordering by completion processed the sale first -- unmatched sale, phantom held position.
+  const T=Date.UTC(2026,8,18,12,47,18);
+  const buy={offerId:'cp-buy',account:'a',itemId:29049,name:'Eclipse Moon chestplate (broken)',state:'CANCELLED_BUY',
+    price:595350,total:3,filled:1,spent:595350,knownStart:true,ticksToFill:114,firstSeen:T,completedAt:T+551000};
+  const sell={offerId:'cp-sell',account:'a',itemId:29049,name:'Eclipse Moon chestplate (broken)',state:'SOLD',
+    price:595350,total:1,filled:1,spent:595350,knownStart:true,ticksToFill:1,firstSeen:T+525000,completedAt:T+526000};
+  assert.ok(buy.completedAt>sell.completedAt,'the buy genuinely finished after the sale');
+  assert.equal(availableAt(buy),T+114*600,'but its item existed from the first fill');
+  const r=computeAutoFlips([buy,sell]);
+  assert.equal(r.flips.length,1,'the sale pairs with the purchase it came from');
+  assert.equal(r.flips[0].profit,-11907,'exactly the tax -- the loss the player actually took');
+  assert.equal(r.openPositions.length,0,'no phantom chestplate left behind');
+  assert.equal(r.unmatchedSells.length,0);
+});
+test('a buy without tick data keeps its old ordering, so no historical flip moves',()=>{
+  const o={offerId:'x',state:'BOUGHT',firstSeen:1000,completedAt:5000,filled:1,spent:10};
+  assert.equal(availableAt(o),5000);
+  assert.equal(availableAt({...o,ticksToFill:-1}),5000,'unknown ticks are not data');
+  assert.equal(availableAt({...o,state:'SOLD',ticksToFill:3}),5000,'a sale is always realised at completion');
+  // Ticks run slow under server lag, so a tick estimate can overshoot; it must never land after
+  // the offer actually finished, or it would push a purchase LATER than the old ordering did.
+  assert.equal(availableAt({...o,ticksToFill:50}),5000,'clamped to completion: first fill cannot follow the finish');
+  assert.equal(availableAt({...o,ticksToFill:2}),2200,'within the window, the first fill is used');
+});
+test('data health: what the total leaves out is counted exactly, never estimated',()=>{
+  const h=dataHealthOf({
+    openPositions:[{itemId:810,unitCost:20,remaining:11000},{itemId:810,unitCost:22,remaining:500},{itemId:32032,unitCost:40000,remaining:5}],
+    unmatchedSells:[{spent:1500000},{spent:250000},{spent:null}],
+  });
+  assert.equal(h.openPositions,3);
+  assert.equal(h.openCost,20*11000+22*500+40000*5,'each lot at its own recorded unit cost');
+  assert.deepEqual(h.openItemIds.sort((a,b)=>a-b),[810,32032],'two lots of darts are one item');
+  assert.equal(h.unmatchedSales,3);
+  assert.equal(h.unmatchedGross,1750000,'a sale with no reported GP adds nothing rather than a guess');
+  assert.deepEqual(dataHealthOf({}),{openPositions:0,openCost:0,openItemIds:[],unmatchedSales:0,unmatchedGross:0});
 });
 test('an offer with no tick information is still matched exactly as before',t=>{
   const {store}=setup(t);

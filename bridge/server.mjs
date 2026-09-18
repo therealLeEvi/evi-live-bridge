@@ -5,11 +5,13 @@ import {fileURLToPath} from 'node:url';
 import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {Store} from './store.mjs';
 import {createMarketCache} from './marketCache.mjs';
-import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,slotCapacity,slotNote} from './suggestions.mjs';
+import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,slotCapacity,slotNote,slotExposure,withCostBasis,sellPriceSupport,sellSupportNote} from './suggestions.mjs';
 import {estimateUnitTax} from './tax.mjs';
 import {createSuggestionLog} from './suggestionLog.mjs';
 import {joinSuggestionOutcomes,summarizeOutcomes} from './suggestionOutcomes.mjs';
 import {createPriceArchive,readArchive} from './priceArchive.mjs';
+import {createNewsChains} from './newsChains.mjs';
+import {createCorrelationIndex,correlationNote,CORRELATED_THRESHOLD} from './correlation.mjs';
 import {buildFillModel,fillChance,fillChanceSentence} from './fillModel.mjs';
 import {relistAdvice} from './relist.mjs';
 
@@ -41,10 +43,35 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
   // hourly Wiki price archive (see priceArchive.mjs). The archive only runs once start() is called,
   // which the standalone entry point below does; tests never start it.
   const suggestionLog=createSuggestionLog(dir),archive=createPriceArchive({dir,log:m=>console.error(m)});
+  // News-to-item linkage (see newsChains.mjs / newsChain.mjs). Reads the mapping and volume caches
+  // this server already keeps, so it costs no extra price fetches -- only wiki lookups, which are
+  // cached per post on disk and walked in the background, never during a request. Volumes are only
+  // consulted when this server has already fetched them for something else; unknown volume never
+  // filters a chain out, the same fail-open rule used everywhere else here.
+  const newsChains=createNewsChains({dir,log:m=>console.error(m),
+    itemIndexByName:name=>mappingCache.byName?.get(String(name).toLowerCase())||null,
+    volumeOf:id=>{
+      const v=lastVolumes?.[String(id)];
+      return v?Math.min(v.highPriceVolume||0,v.lowPriceVolume||0):null;
+    }});
   // The player's own fill record (see fillModel.mjs), rebuilt at most hourly and only from the
   // archived hours their own offers actually fall in -- reading 90 days of archive on every
   // suggestion would be absurd. Never fatal: any failure just means suggestions carry no fill
   // sentence, exactly as before this existed.
+  // Per-pair price correlation from the archive (see correlation.mjs), rebuilt at most hourly like
+  // the fill model beside it and for the same reason: reading 90 days of archive on every
+  // suggestion would be absurd. Six-hourly steps, because the same measurement showed hourly
+  // returns are pure noise. Never fatal -- any failure just means no correlation check, exactly as
+  // before this existed.
+  let correlationCache={at:0,index:null};
+  function correlationIndex(now=Date.now()) {
+    if(correlationCache.index && now-correlationCache.at<3600000)return correlationCache.index;
+    try {
+      const buckets=readArchive(dir,Math.floor(now/1000)-90*86400,Infinity,'1h').filter((_,i)=>i%6===0);
+      correlationCache={at:now,index:buckets.length>60?createCorrelationIndex(buckets):null};
+    } catch { correlationCache={at:now,index:null}; }
+    return correlationCache.index;
+  }
   let fillModelCache={at:0,model:null};
   function playerFillModel(now=Date.now()) {
     if(fillModelCache.model && now-fillModelCache.at<3600000)return fillModelCache.model;
@@ -63,7 +90,27 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
   let pushedSuggestions=[],pushedSuggestionsAt=0;
   // Parsed once per mapping refresh (the fetch itself is cached an hour), keyed by identity of the
   // cached text's parse so a refreshed mapping rebuilds it. See itemIndex() in GET /api/suggestion.
-  let mappingCache={text:null,list:null,index:null};
+  let mappingCache={text:null,list:null,index:null,byName:null};
+  // The most recent /1h volumes this server fetched for any reason, so the news-to-item walk can
+  // drop chains ending at items nobody trades without ever fetching prices of its own. Null until
+  // something else has fetched them, which reads as "unknown" and filters nothing.
+  let lastVolumes=null;
+  // The plugin's latest inventory confirmation per account (see heldPositions in /api/suggestion).
+  // In memory only: it describes the inventory right now, so it is worthless after a restart anyway.
+  const inventoryChecks=new Map();
+  // Shared by the suggestion ranking and the news-to-item walk, so both read one parsed copy of the
+  // item mapping rather than each keeping their own.
+  async function itemIndex() {
+    const text=await suggestionPrices.get('https://prices.runescape.wiki/api/v1/osrs/mapping',3600000);
+    // The market cache hands back the same string for an hour, so this reparses only when the
+    // mapping itself was refetched.
+    if(mappingCache.text!==text) {
+      const list=JSON.parse(text);
+      mappingCache={text,list,index:new Map(list.filter(i=>i&&Number.isFinite(i.id)).map(i=>[i.id,i])),
+        byName:new Map(list.filter(i=>i&&i.name).map(i=>[String(i.name).toLowerCase(),i]))};
+    }
+    return mappingCache.index;
+  }
   if(!/^[a-f0-9]{64}$/.test(secrets.scanner)||!/^[a-f0-9]{64}$/.test(secrets.plugin))throw Error('Invalid keys.json');
   const origin=`http://127.0.0.1:${port}`;
   const server=http.createServer(async(req,res)=>{
@@ -130,7 +177,13 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // the same blocklist set the ranking already respects -- no separate exclusion path needed.
           for(const id of (url.searchParams.get('exclude')||'').split(',').map(s=>parseInt(s,10)).filter(Number.isFinite))blocklist.add(id);
           const riskParam=url.searchParams.get('risk');
-          const risk=['low','medium','high'].includes(riskParam)?riskParam:'medium';
+          // Low is the default: replaying the real personal ranking over 90 days, the old Medium default
+          // showed no edge over picking an eligible item at random, because a single lucky flip could
+          // carry an item (Dragon pickaxe was chosen in 44 of 83 decisions on one imported +1.9m flip,
+          // the same pattern as the chestplate loss). Low -- 3+ trades and a 75% win rate required --
+          // did best on every risk measure: 87% won, 24% of capital stuck, worst trade -167,518. The
+          // plugin sends Medium explicitly now, so choosing it still means Medium.
+          const risk=['low','medium','high'].includes(riskParam)?riskParam:'low';
           // The player's actual current cash stack, read from their inventory's coins by the plugin
           // (never assumed) -- caps and re-ranks suggestions so a trade too big to afford right now
           // is never suggested. Omitted entirely when the plugin hasn't observed it yet (e.g. just
@@ -149,6 +202,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // every other market route here, so it costs at most one upstream call a minute.
           const volumes=await suggestionPrices.get('https://prices.runescape.wiki/api/v1/osrs/1h',60000)
             .then(t=>JSON.parse(t).data||{}).catch(()=>undefined);
+          if(volumes)lastVolumes=volumes;
           // Price-direction forecast for a "buy" suggestion only (see ForecastHorizon/ForecastPolicy
           // on the plugin side). forecastHorizon is null -- meaning skip this entirely, no extra
           // Wiki calls, no change to reasoning -- unless the plugin's own config turned it on. The
@@ -190,16 +244,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           const membersParam=url.searchParams.get('members');
           const freeToPlayWorld=membersParam==='0';
           const account=url.searchParams.get('account')||undefined;
-          async function itemIndex() {
-            const text=await suggestionPrices.get('https://prices.runescape.wiki/api/v1/osrs/mapping',3600000);
-            // The market cache hands back the same string for an hour, so this reparses only when
-            // the mapping itself was refetched.
-            if(mappingCache.text!==text) {
-              const list=JSON.parse(text);
-              mappingCache={text,list,index:new Map(list.filter(i=>i&&Number.isFinite(i.id)).map(i=>[i.id,i]))};
-            }
-            return mappingCache.index;
-          }
+
           // Only built when something could actually use them: a free-to-play world needs the
           // members flag, and the buy-limit check needs to know whose journal to read.
           let membersBlocked, limitFor;
@@ -257,6 +302,59 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // members=.
           const capacity=slotCapacity(url.searchParams.get('freeSlots'),url.searchParams.get('collectable'));
           const geFull=capacity.full;
+          // Stock with nowhere to sell from is how capital gets stuck -- the backtests traced stuck
+          // capital to the sell side. So a new BUY is held back while the free slots are only enough
+          // for the exits already owed. What counts as owed is the subtle part and was wrong once:
+          // see slotExposure in suggestions.mjs. Only stock sitting in the inventory with no slot at
+          // all owes an exit; a buy still in a slot vacates that slot for its own sell.
+          //
+          // Counted, never a fixed fraction of the Grand Exchange. Sell-side suggestions are
+          // unaffected -- they are what the reserve exists for -- and an unknown slot count reserves
+          // nothing at all.
+          // Candidates set aside for a stated reason, so the response can say which -- distinct from
+          // nothing being eligible at all.
+          const heldBack=[];
+          // Holding both halves of a correlated pair is closer to one larger position than two
+          // trades. Compares the candidate against every item currently held or being bought, using
+          // measured price correlation (see correlation.mjs); null -- no archive, too little shared
+          // history, or nothing held -- never blocks anything.
+          async function correlationForSuggestion(candidate) {
+            try {
+              if(!candidate||candidate.action!=='buy')return null;
+              const index=correlationIndex();
+              if(!index)return null;
+              const held=[...exposure].filter(id=>id!==candidate.itemId);
+              if(!held.length)return null;
+              const hit=index.strongestAgainst(candidate.itemId,held);
+              if(!hit||hit.correlation<CORRELATED_THRESHOLD)return null;
+              await itemIndex().catch(()=>{});
+              return {blocked:true,note:correlationNote(hit,id=>mappingCache.index?.get(id)?.name)};
+            } catch { return null; }
+          }
+          const accountState=store.state();
+          // Only positions the plugin has CONFIRMED are in the inventory right now count. The journal
+          // alone is not enough: it only sees the Grand Exchange, so stock sold, used or dropped
+          // outside it stays "held" forever -- reported live, when two long-gone positions (adamant
+          // darts, adamant keel parts) reserved the last two slots. The plugin already verifies
+          // persisted holdings against its inventory snapshot the same way.
+          //
+          // The exchange is deliberately one-sided: the bridge names the items its journal believes
+          // are held (positionItems, in the response), and the plugin echoes back only those that
+          // are really there (heldPositions=). No inventory contents reach the bridge beyond items
+          // it already knew about. With no confirmation at all -- an older plugin, or before the
+          // inventory has loaded -- nothing is verified and nothing is reserved, which is the
+          // fail-open direction: an unconfirmed position never invents a constraint.
+          const accountPositions=(accountState.autoOpenPositions||[]).filter(p=>!account||p.account===account);
+          const confirmedHeld=new Set((url.searchParams.get('heldPositions')||'').split(',').map(s=>parseInt(s,10)).filter(Number.isInteger));
+          const positionItems=[...new Set(accountPositions.map(p=>p.itemId))].sort((a,b)=>a-b);
+          // Remembered for the scanner's data-health line (see /api/state): which of this account's
+          // held positions the plugin actually found in the inventory, and when. Presence of the
+          // parameter, even empty, is what says a check happened -- "checked, found none" is the most
+          // useful answer of all, since it is what exposes a stale position.
+          if(url.searchParams.has('heldPositions'))
+            inventoryChecks.set(account||'',{account:account||null,at:Date.now(),confirmed:[...confirmedHeld]});
+          const {exposure,sellSlotsOwed}=slotExposure(accountPositions.filter(p=>confirmedHeld.has(p.itemId)),accountState.occupied,account);
+          const buysHeldForExits=capacity.free!==null&&!geFull&&capacity.free<=sellSlotsOwed;
           const holdBuyPriceParam=Number(url.searchParams.get('holdBuyPrice'));
           const holdBuyPrice=Number.isFinite(holdBuyPriceParam)&&holdBuyPriceParam>0?holdBuyPriceParam:undefined;
           let suggestion=geFull?null:computeHoldingSuggestion(latest,Number(url.searchParams.get('holdItemId')),Number(url.searchParams.get('holdQty')),url.searchParams.get('holdName')||undefined,url.searchParams.get('holdBuyId')||undefined,holdBuyPrice);
@@ -304,13 +402,17 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
               suggestion=computeInventorySuggestion(latest,inventory,mappingCache.list,{blocklist:inventoryBlocklist,membersBlocked});
             }
           }
-          if(!suggestion && !geFull) {
+          // Both ranking tiers below produce BUY suggestions, so both are held back while the free
+          // slots are only enough for the exits already owed. The holding, persisted and inventory
+          // tiers above are sell-side reminders and deliberately still run.
+          if(!suggestion && !geFull && !buysHeldForExits) {
             suggestion=await pickWithForecast({
               // Imported flips rank alongside observed ones (see Store.importFlips): a player who
               // tracked trades elsewhere for months shouldn't be ranked as if they had no history.
               rank:bl=>computeSuggestion([...state.flips,...state.importedFlips],latest,Date.now(),{minProfit,blocklist:bl,risk,maxSpend,targetDurationMinutes,volumes,maxStackShare,...gates}),
               forecastFor:forecastForSuggestion,policy:forecastPolicy,horizon:forecastHorizon,
-              cushionFor:cushionForSuggestion,requireCushion,blocklist,
+              cushionFor:cushionForSuggestion,requireCushion,correlationFor:correlationForSuggestion,blocklist,
+              onBlocked:rows=>{heldBack.push(...rows);},
             });
           }
           // Only reached when personal history has nothing eligible right now, and only when the
@@ -320,7 +422,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // available and not stale; otherwise falls back to computeMarketSuggestion exactly as
           // before scanner-pushing existed, so a plugin user who never opens the scanner sees no
           // change and pays no extra mapping/volume fetch for a tier that will just fall through.
-          if(!suggestion && !geFull && url.searchParams.get('includeMarket')==='1') {
+          if(!suggestion && !geFull && !buysHeldForExits && url.searchParams.get('includeMarket')==='1') {
             const pushedFresh=pushedSuggestions.length && (Date.now()-pushedSuggestionsAt)<=MAX_PUSHED_AGE_MS;
             let rank;
             if(pushedFresh) {
@@ -332,7 +434,8 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
               ]);
               rank=bl=>computeMarketSuggestion(mappingCache.list,latest,marketVolumes,{minProfit,blocklist:bl,maxSpend,targetDurationMinutes,maxStackShare,taxFreeOnly,...gates});
             }
-            suggestion=await pickWithForecast({rank,forecastFor:forecastForSuggestion,policy:forecastPolicy,horizon:forecastHorizon,cushionFor:cushionForSuggestion,requireCushion,blocklist});
+            suggestion=await pickWithForecast({rank,forecastFor:forecastForSuggestion,policy:forecastPolicy,horizon:forecastHorizon,
+              cushionFor:cushionForSuggestion,requireCushion,correlationFor:correlationForSuggestion,blocklist,onBlocked:rows=>{heldBack.push(...rows);}});
           }
           // Independent of the ranked `suggestion` above: a plain live-market price for whatever
           // item the plugin says is currently open in a GE offer (openItemId, sent whenever a slot
@@ -341,7 +444,26 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // nothing extra. Lets the plugin's hint/hotkey work for any item being traded, not only
           // the single top-ranked pick returned as `suggestion`.
           const openItemId=Number(url.searchParams.get('openItemId'));
-          const openItemPrice=Number.isFinite(openItemId)?lookupItemPrice(latest,openItemId):null;
+          let openItemPrice=Number.isFinite(openItemId)?lookupItemPrice(latest,openItemId):null;
+          // What the player paid for the item they have open, so the offer prompt can warn before a
+          // sale loses GP (see withCostBasis). This session's own observed buy comes first -- it is
+          // the exact price paid -- then the journal's open positions for this account, averaged
+          // over what remains. Opening a sell offer for an item is itself good evidence it is held,
+          // and this only ever adds a warning, so the journal's cost is used without the inventory
+          // confirmation the slot reserve needs. Unknown cost changes nothing.
+          if(openItemPrice) {
+            let unitCost=null,heldQty=1;
+            const holdItemParam=Number(url.searchParams.get('holdItemId'));
+            if(holdItemParam===openItemId&&holdBuyPrice) {
+              unitCost=holdBuyPrice;
+              heldQty=Number(url.searchParams.get('holdQty'))||1;
+            } else {
+              const mine=(accountState.autoOpenPositions||[]).filter(p=>p.itemId===openItemId&&(!account||p.account===account)&&p.unitCost>0&&p.remaining>0);
+              const qty=mine.reduce((s,p)=>s+p.remaining,0);
+              if(qty>0){unitCost=mine.reduce((s,p)=>s+p.unitCost*p.remaining,0)/qty;heldQty=qty;}
+            }
+            openItemPrice=withCostBasis(openItemPrice,unitCost,heldQty);
+          }
           // Live market prices for every item behind a still-in-progress GE offer the plugin is
           // already tracking (slots=itemId:remainingQty,... -- see EviLivePlugin's
           // activeOffers/suggestionQuery()) -- reuses the same `latest` data already fetched above,
@@ -380,6 +502,19 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
             const window=targetDurationMinutes??1440;
             const sentence=fillChanceSentence(fillChance(playerFillModel(),suggestion.quantity,itemVolumes,window),window);
             if(sentence)suggestion.reasoning=(suggestion.reasoning||'')+' '+sentence;
+            // Does the margin survive at what buyers have actually been paying (see sellPriceSupport)?
+            // Checked for every buy, whichever tier produced it, from the Wiki's hourly history for
+            // this one item -- so it works for every player, archive or not -- cached for ten minutes,
+            // so a suggestion that stays on screen costs one fetch rather than one every poll. Put
+            // FIRST in the reasoning rather than appended: it is the one thing in there saying the
+            // trade itself may not work, and the caveats after it must not bury it. Any failure to
+            // fetch simply means no warning, as with every other check here.
+            try {
+              const text=await suggestionPrices.get(`https://prices.runescape.wiki/api/v1/osrs/timeseries?id=${suggestion.itemId}&timestep=1h`,600000);
+              const support=sellPriceSupport(JSON.parse(text).data||[],suggestion.itemId,suggestion.buyPrice);
+              const warning=sellSupportNote(support,suggestion.sellPrice);
+              if(warning){suggestion.reasoning=warning+' '+(suggestion.reasoning||'');suggestion.sellSupport=support;}
+            } catch {}
           }
           // Every slot is occupied, but at least one holds a finished offer (or the plugin couldn't
           // say). The suggestion is still shown -- it may well be the right trade -- with the one
@@ -403,7 +538,12 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // slots: what the GE's own capacity allowed on this call, echoed back so the sidebar (and
           // anything else reading this endpoint) can tell "nothing passed your settings" apart from
           // "your settings were never consulted, because there was nowhere to place an offer".
-          return send(200,{suggestion,openItemPrice,slotPrices,slotFill,relistAdvice:relist,slots:capacity});
+          // slots additionally carries the sell-side reserve, and heldBack names anything set aside
+          // for a stated reason -- both so the sidebar can explain a missing suggestion instead of
+          // falling back on "nothing passes your settings", which would be untrue here.
+          return send(200,{suggestion,openItemPrice,slotPrices,slotFill,relistAdvice:relist,
+            slots:{...capacity,sellSlotsOwed,buysHeldForExits,positionItems},
+            heldBack:heldBack.slice(0,3)});
         } catch(e) {return send(502,{error:e.message});}
       }
       if(!ui) {
@@ -444,7 +584,22 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
         }
       }
       if(req.method!=='GET')return send(405,{error:'Method not allowed'});
-      if(pathname==='/api/state')return send(200,store.state());
+      if(pathname==='/api/state') {
+        const st=store.state();
+        // How many of the held positions the plugin actually found in the inventory, when it checked
+        // within the last ten minutes -- older than that says nothing about now. Counted against that
+        // account's own positions, since a player with two accounts has two inventories. Items in the
+        // bank are not "found", so this is phrased in the scanner as seen in the inventory, never as
+        // proof that the rest are gone.
+        const check=[...inventoryChecks.values()].sort((a,b)=>b.at-a.at)[0];
+        if(check&&Date.now()-check.at<600000) {
+          const mine=(st.autoOpenPositions||[]).filter(p=>!check.account||p.account===check.account);
+          const items=new Set(mine.map(p=>p.itemId));
+          st.dataHealth={...st.dataHealth,inventoryCheck:{at:check.at,positions:items.size,
+            seenInInventory:check.confirmed.filter(id=>items.has(id)).length}};
+        }
+        return send(200,st);
+      }
       if(pathname==='/api/price-archive')return send(200,archive.status());
       // How EVI's own suggestions actually turned out (see suggestionOutcomes.mjs). Scanner-gated
       // like every other view of the player's own data.
@@ -452,6 +607,16 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
         const state=store.state();
         const rows=joinSuggestionOutcomes(suggestionLog.recent(500),[...store.offers.values()],[...state.flips,...state.autoFlips]);
         return send(200,{summary:summarizeOutcomes(rows),recent:rows.slice(-25).reverse()});
+      }
+      // Which tradeable items each recent news post connects to, and the chain of game mechanics
+      // that links them (see newsChain.mjs for why this follows the wiki's own links rather than
+      // matching item names in the article). Answers from cache immediately and refreshes in the
+      // background when stale, so a request never waits on dozens of wiki lookups. Needs the item
+      // mapping to name anything at all, so it is warmed here on the first call rather than left to
+      // whichever other route happens to run first.
+      if(pathname==='/api/news-items') {
+        await itemIndex().catch(()=>{});
+        return send(200,newsChains.get());
       }
       // Only public market/news endpoints. No arbitrary URL proxy and no trade data in requests.
       const routes={mapping:['mapping',3600000],latest:['latest',60000],'5m':['5m',60000],'1h':['1h',60000]};

@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {personalHistory, computeSuggestion, computeMarketSuggestion, computeHoldingSuggestion, computeInventorySuggestion, computePushedSuggestion, pickPersistentOpenPosition, lookupItemPrice, forecastFromSeries, timestepForHorizon, UNFAVORABLE_FORECAST_CONFIDENCE, decideForecast, pickWithForecast, estimateOfferFill, estimateVolatility, marginClearsCushion, MARGIN_CUSHION_MULTIPLIER, breakEvenSellPrice, priceAgeMinutes, MAX_PRICE_AGE_MINUTES, slotCapacity, slotNote, GE_SLOTS} from '../bridge/suggestions.mjs';
+import {personalHistory, computeSuggestion, computeMarketSuggestion, computeHoldingSuggestion, computeInventorySuggestion, computePushedSuggestion, pickPersistentOpenPosition, lookupItemPrice, forecastFromSeries, timestepForHorizon, UNFAVORABLE_FORECAST_CONFIDENCE, decideForecast, forecastPolicyNote, FORECAST_MAY_DROP_CANDIDATES, pickWithForecast, estimateOfferFill, estimateVolatility, marginClearsCushion, MARGIN_CUSHION_MULTIPLIER, breakEvenSellPrice, priceAgeMinutes, MAX_PRICE_AGE_MINUTES, slotCapacity, slotNote, slotExposure, withCostBasis, sellPriceSupport, sellSupportNote, volumeReadingFor, GE_SLOTS} from '../bridge/suggestions.mjs';
 
 const now = 1700000000000;
 function flip(o = {}) {
@@ -660,15 +660,21 @@ test('timestepForHorizon mirrors the scanner\'s own Predict-button pairing', () 
   assert.equal(timestepForHorizon('bogus'), null);
 });
 
-test('decideForecast: only skip-policy plus a confident falling forecast retries', () => {
+// The forecast no longer drops candidates, and that is a measurement rather than a preference: see
+// FORECAST_MAY_DROP_CANDIDATES and bridge/forecastCalibration.mjs. Calibrated over 90 days, the
+// candidates this policy used to drop went on to move +4.261% while the ones it kept moved +0.553%.
+test('decideForecast: an unproven forecast never removes a candidate, whatever the policy says', () => {
   const falling = {dir: -1, confidence: 80};
-  const weakFalling = {dir: -1, confidence: UNFAVORABLE_FORECAST_CONFIDENCE - 1};
   const rising = {dir: 1, confidence: 90};
+  assert.equal(FORECAST_MAY_DROP_CANDIDATES, false, 'the forecast has not earned the right to rule a trade out');
   assert.equal(decideForecast(null, 'skip'), 'keep');
   assert.equal(decideForecast(falling, 'warn'), 'keep');
-  assert.equal(decideForecast(falling, 'skip'), 'retry');
-  assert.equal(decideForecast(weakFalling, 'skip'), 'keep');
+  assert.equal(decideForecast(falling, 'skip'), 'keep', 'the strongest possible unfavourable reading must still only warn');
+  assert.equal(decideForecast({dir: -1, confidence: 88}, 'skip'), 'keep');
   assert.equal(decideForecast(rising, 'skip'), 'keep');
+  // Asking for skipping and silently getting nothing would be a setting that does nothing at all.
+  assert.match(forecastPolicyNote('skip'), /inactive/);
+  assert.equal(forecastPolicyNote('warn'), null, 'nothing to explain when nothing was asked for');
 });
 
 test('pickWithForecast: no horizon means the first candidate is returned untouched, no forecast call', async () => {
@@ -687,16 +693,22 @@ test('pickWithForecast: a "sell" suggestion is never forecast', async () => {
   assert.equal(calls, 0);
 });
 
-test('pickWithForecast: warn mode keeps an unfavourable forecast, folding it into reasoning', async () => {
+test('pickWithForecast: the forecast is reported as fill risk, never as a price direction', async () => {
   const candidate = {itemId: 1, action: 'buy', reasoning: 'base'};
   const forecast = {label: 'Likely falling', dir: -1, confidence: 80};
-  const result = await pickWithForecast({rank: () => candidate, forecastFor: async () => forecast, policy: 'warn', horizon: 'overnight', blocklist: new Set()});
+  // ~6 hours: the only setting the fill rates were measured with (see fillOutlook).
+  const result = await pickWithForecast({rank: () => candidate, forecastFor: async () => forecast, policy: 'warn', horizon: '6h', blocklist: new Set()});
   assert.equal(result, candidate);
-  assert.equal(result.forecast, forecast);
-  assert.match(result.reasoning, /Price forecast \(overnight\): Likely falling, 80% confidence\./);
+  assert.equal(result.forecast, forecast, 'the raw forecast still travels with the candidate');
+  // Calibration found the direction labels wrong more often than chance and the strength score
+  // uninformative, so neither is shown; the same signal's measured fill behaviour is.
+  assert.ok(!/Likely falling|Likely rising/.test(result.reasoning), 'no direction claim reaches the player');
+  assert.ok(!/confidence/.test(result.reasoning));
+  assert.ok(result.fillOutlook, 'and the fill outlook is attached for anything that wants the numbers');
+  assert.match(result.reasoning, /fill|sold within|Entry risk|Exit risk/i);
 });
 
-test('pickWithForecast: skip mode retries the next-best candidate and excludes the rejected one via blocklist', async () => {
+test('pickWithForecast: skip mode keeps the top candidate and explains why it did not skip', async () => {
   const blocklist = new Set();
   const seen = [];
   const rank = bl => {
@@ -706,16 +718,21 @@ test('pickWithForecast: skip mode retries the next-best candidate and excludes t
   };
   const forecastFor = async itemId => itemId === 1 ? {label: 'Likely falling', dir: -1, confidence: 90} : {label: 'Stable', dir: 0, confidence: 50};
   const result = await pickWithForecast({rank, forecastFor, policy: 'skip', horizon: 'overnight', blocklist});
-  assert.equal(result.itemId, 2);
-  assert.ok(blocklist.has(1), 'the rejected item must be added to the shared blocklist');
-  assert.equal(seen.length, 2);
+  // The old behaviour dropped item 1 and returned item 2 -- which measurement showed was throwing
+  // away the better trade, so the best-ranked candidate now stands.
+  assert.equal(result.itemId, 1);
+  assert.ok(!blocklist.has(1), 'an unproven forecast must not exclude an item from ranking');
+  assert.equal(seen.length, 1, 'and must not cost an extra ranking pass');
+  assert.match(result.reasoning, /inactive/);
 });
 
-test('pickWithForecast: gives up after maxAttempts and returns null, same as nothing eligible', async () => {
+test('pickWithForecast: the retry machinery still works, for the checks that did earn it', async () => {
+  // The cushion check is measured and still drops candidates; this is the same retry path the
+  // forecast used, so it must keep working for whenever a calibrated forecast earns it back.
   let attempts = 0;
   const rank = () => { attempts++; return {itemId: attempts, action: 'buy', reasoning: 'pick'}; };
-  const forecastFor = async () => ({label: 'Likely falling', dir: -1, confidence: 90});
-  const result = await pickWithForecast({rank, forecastFor, policy: 'skip', horizon: 'overnight', blocklist: new Set(), maxAttempts: 3});
+  const result = await pickWithForecast({rank, cushionFor: async () => ({blocked: true}), requireCushion: true,
+    policy: 'warn', horizon: null, blocklist: new Set(), maxAttempts: 3});
   assert.equal(result, null);
   assert.equal(attempts, 3);
 });
@@ -850,20 +867,21 @@ test('pickWithForecast: a missing cushion read (network hiccup / too little hist
   assert.equal(result.reasoning, 'base');
 });
 
-test('pickWithForecast: forecast and cushion both apply, compounding across independent retries', async () => {
+test('pickWithForecast: the cushion still drops candidates while the forecast only annotates them', async () => {
   const blocklist = new Set();
   const rank = bl => {
-    if (bl.has(1) && bl.has(2)) return {itemId: 3, action: 'buy', reasoning: 'third pick'};
     if (bl.has(1)) return {itemId: 2, action: 'buy', reasoning: 'second pick'};
     return {itemId: 1, action: 'buy', reasoning: 'first pick'};
   };
-  // Item 1: unfavourable forecast, skip policy -> retried. Item 2: fine forecast, but blocked by
-  // cushion -> retried. Item 3: fine forecast, clears cushion -> kept.
-  const forecastFor = async itemId => itemId === 1 ? {label: 'Likely falling', dir: -1, confidence: 90} : {label: 'Stable', dir: 0, confidence: 50};
-  const cushionFor = async c => c.itemId === 2 ? {blocked: true} : {blocked: false};
-  const result = await pickWithForecast({rank, forecastFor, policy: 'skip', horizon: 'overnight', cushionFor, requireCushion: true, blocklist, maxAttempts: 5});
-  assert.equal(result.itemId, 3);
-  assert.ok(blocklist.has(1) && blocklist.has(2), 'both rejected candidates must be blocklisted');
+  // Item 1: unfavourable forecast AND blocked by the cushion -> retried, on the cushion's evidence
+  // alone. Item 2: same unfavourable forecast, clears the cushion -> kept, forecast noted only.
+  // This is the whole shape of the change: a measured check may exclude, an unproven one may not.
+  const forecastFor = async () => ({label: 'Likely falling', dir: -1, confidence: 90});
+  const cushionFor = async c => c.itemId === 1 ? {blocked: true} : {blocked: false};
+  const result = await pickWithForecast({rank, forecastFor, policy: 'skip', horizon: '6h', cushionFor, requireCushion: true, blocklist, maxAttempts: 5});
+  assert.equal(result.itemId, 2);
+  assert.ok(blocklist.has(1), 'the cushion-blocked candidate is still excluded');
+  assert.match(result.reasoning, /Entry risk|Exit risk|sold within|fill/i, 'and the kept one still carries the fill warning');
 });
 
 test('pickWithForecast: cushion blocking every candidate exhausts maxAttempts and returns null', async () => {
@@ -1096,6 +1114,125 @@ test('personal history: the volume-share cap applies here too, so a proven item 
 
 
 // --- Grand Exchange slot capacity (8 offers, no more) ---
+
+// The sell-side reserve, and the bug the user found with it from the live client: suggestions
+// stopped at FOUR slots out of eight. The original reasoning counted every in-progress buy as owing
+// an exit slot, but a buy vacates its own slot when collected and the sell goes straight into it --
+// so four buys reserved four more slots they would never need.
+test('slot exposure: buys in progress owe no extra slot, so all eight can be used', () => {
+  const buying = [1, 2, 3, 4, 5, 6, 7].map(itemId => ({itemId, state: 'BUYING', account: 'a'}));
+  const e = slotExposure([], buying, 'a');
+  assert.equal(e.sellSlotsOwed, 0, 'a buy brings its own slot for its sell -- this is the four-slot bug');
+  assert.equal(e.exposure.size, 7, 'but every one of them is still exposure, for the correlation check');
+});
+
+test('slot exposure: a finished buy not yet collected still holds its own slot for the sell', () => {
+  const e = slotExposure([{itemId: 9, account: 'a'}], [{itemId: 9, state: 'BOUGHT', account: 'a'}], 'a');
+  assert.equal(e.sellSlotsOwed, 0, 'collecting it frees exactly the slot the sell will use');
+  assert.ok(e.exposure.has(9));
+});
+
+test('slot exposure: only stock with no slot at all owes one', () => {
+  // Bought, collected, left in the inventory: nothing to reuse, so a sell genuinely needs a free slot.
+  const positions = [{itemId: 1, account: 'a'}, {itemId: 2, account: 'a'}, {itemId: 3, account: 'a'}];
+  const occupied = [{itemId: 3, state: 'SELLING', account: 'a'}, {itemId: 8, state: 'BUYING', account: 'a'}];
+  const e = slotExposure(positions, occupied, 'a');
+  assert.deepEqual(e.owedItems.sort(), [1, 2], 'item 3 already has its sell standing; items 1 and 2 have nowhere to go');
+  assert.equal(e.sellSlotsOwed, 2);
+  assert.deepEqual([...e.exposure].sort(), [1, 2, 3, 8]);
+});
+
+test('slot exposure: another account is never counted, and nothing known owes nothing', () => {
+  const e = slotExposure([{itemId: 1, account: 'other'}], [{itemId: 2, state: 'BUYING', account: 'other'}], 'a');
+  assert.equal(e.sellSlotsOwed, 0);
+  assert.equal(e.exposure.size, 0);
+  assert.equal(slotExposure(null, null, 'a').sellSlotsOwed, 0, 'missing data reserves nothing -- fail open');
+});
+
+// Reported from the live client, and it cost GP: holding an Eclipse Moon chestplate (broken) bought
+// at 595,350, the offer prompt offered to sell at the market's 595,350 with no warning -- because the
+// plain open-item price never knew what the player paid. Selling there lost exactly the tax.
+test('open item price: warns with the break-even when selling a held item would lose GP', () => {
+  const plain = {itemId: 29049, buyPrice: 595350, sellPrice: 595350};
+  const warned = withCostBasis(plain, 595350, 1);
+  assert.equal(warned.action, 'sell', 'marked as a sale of held stock, which is what lets the prompt warn');
+  assert.equal(warned.breakEvenPrice, 607499, 'the same break-even the sidebar computed for this exact trade');
+  assert.equal(warned.lossIfSoldNow, 11907, 'exactly the tax -- the loss the player actually took');
+  assert.equal(warned.sellPrice, 595350, 'a warning, never a block: the price itself is unchanged');
+  // Same arithmetic as the sidebar's holding reminder, so the two can never disagree.
+  const sidebar = computeHoldingSuggestion({'29049': {high: 595350, low: 590000}}, 29049, 1, 'Eclipse Moon chestplate (broken)', undefined, 595350);
+  assert.equal(warned.breakEvenPrice, sidebar.breakEvenPrice);
+  assert.equal(warned.lossIfSoldNow, sidebar.lossIfSoldNow);
+});
+
+test('open item price: a profitable sale carries its break-even and no loss', () => {
+  const r = withCostBasis({itemId: 29049, buyPrice: 595350, sellPrice: 618004}, 595350, 1);
+  assert.equal(r.lossIfSoldNow, null);
+  assert.equal(r.breakEvenPrice, 607499);
+});
+
+test('open item price: an unknown cost leaves the price exactly as it was', () => {
+  const plain = {itemId: 29049, buyPrice: 595350, sellPrice: 595350};
+  for (const cost of [null, undefined, 0, -5, NaN]) assert.equal(withCostBasis(plain, cost), plain, `cost ${cost} must never be guessed`);
+  assert.equal(withCostBasis(null, 595350), null);
+  // Loss scales with what is actually held.
+  assert.equal(withCostBasis(plain, 595350, 3).lossIfSoldNow, 11907 * 3);
+});
+
+// The chestplate loss, root cause: EVI said buy at 595,350 / sell at 618,004, but over the previous 12
+// hours 48 buyers had paid an average of 587,104. The margin existed only at one outlier trade.
+const HOUR_S = 3600;
+const nowMs = Date.UTC(2026, 8, 18, 12, 47);
+const endS = Math.floor(nowMs / 3600000) * 3600;
+const series = pts => pts.map(([hoursAgo, price, vol]) => ({timestamp: endS - hoursAgo * HOUR_S, avgHighPrice: price, highPriceVolume: vol}));
+
+test('sell support: a margin that exists only at one outlier print is flagged, with the real price', () => {
+  // 48 buyers across the window averaging 587,104 -- below even the suggested buy price.
+  const s = sellPriceSupport(series([[12, 587104, 24], [8, 587104, 24]]), 29049, 595350, {nowMs});
+  assert.equal(s.supported, false);
+  assert.equal(s.units, 48);
+  assert.equal(Math.round(s.averagePaid), 587104);
+  assert.ok(s.netAtAverage < 0, 'at what buyers actually pay, this flip loses');
+  const note = sellSupportNote(s, 618004);
+  assert.match(note, /618,004/);
+  assert.match(note, /48 buyers paid an average of 587,104/);
+  assert.match(note, /loses about/);
+});
+
+test('sell support: a margin that holds at what buyers really pay says nothing', () => {
+  const s = sellPriceSupport(series([[6, 640000, 30], [2, 645000, 30]]), 29049, 595350, {nowMs});
+  assert.equal(s.supported, true);
+  assert.equal(sellSupportNote(s, 650000), null, 'no warning when the trade stands up -- noise gets ignored');
+});
+
+test('sell support: nobody buying at all over the window is its own warning', () => {
+  const s = sellPriceSupport(series([[30, 600000, 5]]), 29049, 595350, {nowMs});   // only data 30h ago
+  assert.equal(s.units, 0, 'trades outside the 12-hour window do not count');
+  assert.match(sellSupportNote(s, 618004), /nobody bought this item at all in the last 12 hours/);
+});
+
+test('sell support: no series is no view, never a guess', () => {
+  assert.equal(sellPriceSupport(null, 29049, 595350), null);
+  assert.equal(sellPriceSupport([], 29049, 595350), null);
+  assert.equal(sellPriceSupport(series([[3, 600000, 5]]), 29049, 0), null, 'no buy price, nothing to compare');
+  assert.equal(sellSupportNote(null, 618004), null);
+  // Hours with no buyers or no price are skipped, not averaged in as zeros.
+  const s = sellPriceSupport(series([[4, null, 0], [3, 640000, 10], [2, 0, 5]]), 29049, 595350, {nowMs});
+  assert.equal(s.units, 10);
+  assert.equal(Math.round(s.averagePaid), 640000);
+});
+
+test('volume reading: a measured zero constrains sizing, a missing reading does not', () => {
+  // Listed with 0 bought and 1 sold: exactly what the bridge saw for the chestplate at 12:47.
+  assert.equal(volumeReadingFor({'29049': {highPriceVolume: 0, lowPriceVolume: 1}}, 29049), 0);
+  assert.equal(volumeReadingFor({'4151': {highPriceVolume: 90, lowPriceVolume: 80}}, 29049), null, 'absent stays unknown for sizing');
+  assert.equal(volumeReadingFor(undefined, 29049), null);
+  // End to end through the real ranking: the chestplate is now sized to 1, not 3.
+  const flips = [flip({itemId: 29049, item: 'Eclipse Moon chestplate (broken)', quantity: 3, capital: 1645365, netProceeds: 3424356, profit: 1778991})];
+  const prices = {'29049': {high: 618004, low: 595350, highTime: nowMs / 1000 - 120, lowTime: nowMs / 1000 - 60}};
+  const s = computeSuggestion(flips, prices, nowMs, {volumes: {'29049': {highPriceVolume: 0, lowPriceVolume: 1}}, maxSpend: 50_000_000});
+  assert.equal(s.quantity, 1, 'zero buyers in the last hour is a reading, and it caps the size');
+});
 
 test('slot capacity: a free slot means no constraint at all', () => {
   const c = slotCapacity('3', '1');

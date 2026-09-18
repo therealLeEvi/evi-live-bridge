@@ -5,7 +5,7 @@ Base URL: `http://127.0.0.1:51743`. No LAN binding, CORS, arbitrary upstream URL
 | Endpoint | Access | Result |
 | --- | --- | --- |
 | `POST /api/unlock` | Exact browser Origin; JSON `{ "key": "SCANNER_KEY" }` | Sets local HttpOnly, SameSite=Strict cookie |
-| `GET /api/state` | Scanner cookie | `sessions`, `active`, `completed`, `flips` |
+| `GET /api/state` | Scanner cookie | `sessions`, `active`, `occupied`, `completed`, `flips`, `dataHealth` (see below) |
 | `POST /api/events` | `Authorization: Bearer PLUGIN_KEY` | Validates and stores a passive snapshot |
 | `GET /api/suggestion?minProfit=&blocklist=&risk=&openItemId=` | `Authorization: Bearer PLUGIN_KEY` | `{ "suggestion": {...} \| null, "openItemPrice": {...} \| null }` -- `suggestion` ranked from this account's own reviewed flips only; `openItemPrice` a plain live-market price for whatever item ID `openItemId` names, independent of ranking (see below). This is not the full parameter list -- see the "Optional query parameters" section below for the rest (`includeMarket`, `duration`, `cash`, `exclude`, `holdItemId`/`holdQty`/`holdName`). |
 | `POST /api/flips` | Cookie, exact Origin, `X-EVI-UI: 1` | Reviews a matched pair using `{buyId,sellId,netProceeds}` |
@@ -13,6 +13,7 @@ Base URL: `http://127.0.0.1:51743`. No LAN binding, CORS, arbitrary upstream URL
 | `GET /api/market/mapping`, `/latest`, `/5m`, `/1h` | Cookie | Fixed public price API proxy; all paths start `/api/market/` |
 | `GET /api/market/timeseries?id=4151&timestep=1h` | Cookie | Fixed public item time series |
 | `GET /api/news` | Cookie | Official OSRS RSS |
+| `GET /api/news-items` | Cookie | Tradeable items each recent news post connects to, with the chain of wiki pages linking them (`bridge/newsChain.mjs`). Answered from a per-post cache immediately; the wiki walk runs in the background, one request at a time, at most twice a day. A connection, never a price prediction. |
 
 Example event body (the real plugin sends eight unique slots while logged in):
 
@@ -78,9 +79,22 @@ Optional query parameters, all built by the plugin from its own local config and
 - `slots` — `itemId:remainingQty` pairs for every still-in-progress GE offer, e.g. `slots=4151:300,12:50`; populates the `slotPrices` and `slotFill` response fields so the plugin can say when an offer's own price has drifted from the market or is running slower than the target duration. Terminal-but-uncollected offers are deliberately left out — there is nothing left to cancel or relist.
 - `freeSlots`, `collectable` — how much room the Grand Exchange has: slots that are genuinely empty, and slots holding a finished offer that has not been collected. Old School allows eight simultaneous offers, so when `freeSlots=0&collectable=0` the bridge skips *every* ranking tier and returns `suggestion: null` — with nowhere to place an offer, nothing it could rank can be acted on. A finished, uncollected offer is **not** treated as no room (collecting is one click), so ranking continues and the suggestion carries a note saying how many can be collected. Either parameter missing, negative, above 8 or non-numeric reads as "not known yet" and constrains nothing — see `slotCapacity` in `bridge/suggestions.mjs`.
 - `members` — `1` or `0` for the kind of world the player is logged into, so a members-only item is never suggested on a free-to-play world. Unset means unknown and filters nothing.
+- `heldPositions` — which of the item IDs this bridge named in `slots.positionItems` the plugin actually found in the player's inventory. The plugin only ever echoes IDs the bridge named itself, so no other inventory contents leave the client. Sent even when empty once a check has happened, because "checked, found none" is what exposes a stale position. Used for the sell-slot reserve (only confirmed stock owes an exit slot) and the scanner's data-health line. Absent means unchecked, which reserves nothing.
+- `risk` — defaults to `low` when absent (it was `medium`): replayed over 90 days, Medium did no better than a random eligible pick. The plugin sends `risk=medium` explicitly.
 - `profile`, `stackShare`, `cushion`, `forecast`, `onForecast`, `includeInventory`/`inventory`, `holdBuyId`, `holdBuyPrice`, `account` — the remaining settings- and session-derived parameters; each is read once at the top of the `/api/suggestion` handler in `bridge/server.mjs`, where what it does is documented next to the code that does it.
 
 Two response fields accompany `suggestion` and `openItemPrice` beyond `slotPrices`/`slotFill`:
 
 - `slots` — `{free, collectable, full, tight}`, echoing back what the capacity parameters above were understood to mean. `full` is what suppressed ranking; `tight` means every slot is occupied but something can be collected. `free`/`collectable` are `null` when unknown.
+- `slots.positionItems` — the item IDs this account's journal believes are still held, for the plugin to confirm against its inventory (see `heldPositions`).
+- `heldBack` — up to three candidates set aside for a stated reason (currently: moving with an item already held, see `bridge/correlation.mjs`), so a missing suggestion can be explained rather than blamed on settings.
+- On a buy `suggestion`: `sellSupport` when its margin disappears at the price buyers actually paid over the last 12 hours (`sellPriceSupport`, with a warning at the front of `reasoning`), and `fillOutlook` with the measured buy/sell fill rates for its price pattern. Neither ever blocks a suggestion.
+- On `openItemPrice`: when the open item is one the player holds, `action: "sell"`, `breakEvenPrice` and `lossIfSoldNow`, using the same arithmetic as the holding reminder, so the offer prompt can warn before a sale loses GP.
+
+`GET /api/state` additionally returns:
+
+- `occupied` — every offer in one of the eight slots right now, including finished ones not yet collected (unlike `active`), since an uncollected offer still holds its slot.
+- `dataHealth` — what the headline profit total does not include, counted exactly and never estimated: `unmatchedSales` / `unmatchedGross` (sales with no recorded purchase, and the GP they reported), `openPositions` / `openCost` (purchases not yet sold, at their own recorded unit cost), and, when the plugin checked within the last ten minutes, `inventoryCheck.seenInInventory` of `inventoryCheck.positions` for that account.
+
+`POST /api/price-archive` also accepts `{"fiveMinute": {"enabled": true, "backfillDays": 0-90}}` for an optional five-minute archive alongside the hourly one, and its status reports each stream under `steps["1h"]` / `steps["5m"]`, including how many buckets remain to fetch. Both are off by default.
 - `relistAdvice` — one hedged sentence per sell offer that has been sitting unsold longer than a quarter of the target duration: how long it has waited, what the market is now, and whether relisting there still clears the stock's break-even after tax. Built entirely from the bridge's own journal, so the plugin sends nothing extra for it. It never suggests a price below break-even, and says so plainly when the market has fallen under it — see `bridge/relist.mjs`.

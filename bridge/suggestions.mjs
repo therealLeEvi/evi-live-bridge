@@ -1,4 +1,5 @@
 import {estimateUnitTax} from './tax.mjs';
+import {fillOutlook, fillOutlookSentence} from './fillOutlook.mjs';
 
 function median(nums) {
   if (!nums.length) return null;
@@ -71,6 +72,66 @@ const VOLUME_WINDOW_MINUTES = 60;
 // lumpier than "evenly spread" -- treat this as a rough sanity check ("is this even in the right
 // ballpark for my time budget"), not a guarantee. Returns Infinity when there's no usable volume
 // signal at all, so a candidate is never penalized for missing data, only for a bad estimate.
+// How much traded in an item over the last hour, for SIZING, or null when it should constrain nothing.
+// An item LISTED in the Wiki's /1h snapshot with 0 on one side is a measured zero -- that side
+// genuinely did not trade -- and must constrain. Treating it as unknown is what let the chestplate,
+// listed with 0 bought and 1 sold, be suggested at full size.
+//
+// An item ABSENT from the snapshot also traded nothing, strictly speaking, but it deliberately stays
+// "no reading" here: this caps how much gets suggested, and counting every rare item that merely had
+// a quiet hour as zero would shrink far more suggestions than the bug that prompted this. The looser
+// reading belongs in a warning, which restricts nothing -- see sellSideSupport.
+export function volumeReadingFor(volumes, itemId) {
+  const v = volumes?.[String(itemId)];
+  if (!v) return null;
+  return Math.min(v.highPriceVolume || 0, v.lowPriceVolume || 0);
+}
+
+// Does a buy suggestion's margin survive at the price buyers have ACTUALLY been paying?
+//
+// The sell price EVI quotes is /latest's "high": a single print, the most recent instant-buy. On a
+// thin item one trade can sit far above the market. That is exactly what cost GP on an Eclipse Moon
+// chestplate (broken): EVI said buy at 595,350 and sell at 618,004, but over the previous 12 hours 48
+// buyers had paid an average of 587,104 -- LESS than the suggested buy price. The margin existed only
+// at one outlier trade, and the player lost the tax.
+//
+// Measured before choosing, against the player's real top 25 suggestions, because a warning that
+// fires on everything gets ignored:
+//   * "nobody bought in the last hour"         caught it, but fired on 32% -- quiet rares, not risk
+//   * demand collapse against the item's norm  caught it, fired on 20%
+//   * margin at the 12-hour buyer average      caught it (on 48 buyers), fired on 4%
+// The last is also the one that names the actual mechanism, so it is the one shipped.
+//
+// series: the Wiki's /timeseries?timestep=1h points for the item ({timestamp, avgHighPrice,
+// highPriceVolume}). Uses the `hours` full hours before `nowMs`. Returns null -- never a guess -- when
+// there is no series to judge by.
+export const SELL_SUPPORT_HOURS = 12;
+export function sellPriceSupport(series, itemId, buyPrice, {hours = SELL_SUPPORT_HOURS, nowMs = Date.now()} = {}) {
+  if (!Array.isArray(series) || !series.length || !(buyPrice > 0)) return null;
+  const end = Math.floor(nowMs / 3600000) * 3600, start = end - hours * 3600;
+  let units = 0, gp = 0;
+  for (const p of series) {
+    if (!(p.timestamp >= start && p.timestamp < end)) continue;
+    const price = Number(p.avgHighPrice), vol = Number(p.highPriceVolume);
+    if (price > 0 && vol > 0) { units += vol; gp += price * vol; }
+  }
+  if (!units) return {units: 0, hours, averagePaid: null, netAtAverage: null, supported: false};
+  const averagePaid = gp / units;
+  const netAtAverage = averagePaid - estimateUnitTax(itemId, averagePaid) - buyPrice;
+  return {units, hours, averagePaid, netAtAverage, supported: netAtAverage > 0};
+}
+
+// One warning sentence, or null when the margin holds at what buyers really pay. A warning, never a
+// block: the player may know something the average doesn't, and the price is still offered.
+export function sellSupportNote(support, sellPrice) {
+  if (!support || support.supported) return null;
+  const quoted = Number.isFinite(sellPrice) ? `${Math.round(sellPrice).toLocaleString('en-US')} gp` : 'the sell price';
+  if (!support.units)
+    return `Warning: nobody bought this item at all in the last ${support.hours} hours, so the sell price of ${quoted} rests on almost no trading. Your sale may not fill.`;
+  const perItem = Math.round(Math.abs(support.netAtAverage)).toLocaleString('en-US');
+  return `Warning: the sell price of ${quoted} rests on very few trades. Over the last ${support.hours} hours, ${support.units.toLocaleString('en-US')} buyers paid an average of ${Math.round(support.averagePaid).toLocaleString('en-US')} gp -- at that price this flip loses about ${perItem} gp per item after tax.`;
+}
+
 function estimatedFillMinutes(quantity, liquidity, windowMinutes) {
   if (!(liquidity > 0)) return Infinity;
   return quantity / (liquidity / windowMinutes);
@@ -220,9 +281,14 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
     // within a day only 17% of the time, against 65% for orders under 10%.
     let shareLimited = false;
     const ownVolume = options.volumes?.[String(h.itemId)];
-    const ownLiquidity = ownVolume ? Math.min(ownVolume.highPriceVolume || 0, ownVolume.lowPriceVolume || 0) : 0;
+    // A MEASURED zero is not missing data. This used to read `ownLiquidity > 0`, so an item nobody
+    // had bought in the last hour skipped the cap entirely -- zero demand treated exactly like "no
+    // volume data, constrain nothing". That is how an Eclipse Moon chestplate (broken) that no one had
+    // bought at the high side for four full hours was suggested at quantity 3, with a sell target
+    // resting on a single two-unit print; the player followed it and lost the tax. See volumeReadingFor.
+    const ownLiquidity = volumeReadingFor(options.volumes, h.itemId);
     const personalVolumeShare = Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : DEFAULT_MAX_VOLUME_SHARE;
-    if (ownLiquidity > 0 && personalVolumeShare > 0) {
+    if (ownLiquidity !== null && personalVolumeShare > 0) {
       const withinVolume = Math.max(1, Math.floor(ownLiquidity * personalVolumeShare));
       if (withinVolume < quantity) { quantity = withinVolume; shareLimited = true; }
     }
@@ -412,6 +478,34 @@ export function computeHoldingSuggestion(latestPrices, holdItemId, holdQty, hold
 // items untaxed). Net proceeds (p - tax(p)) never decrease as p rises, so starting from the
 // closed-form estimate and nudging a few gp either way is exact. Returns null for a missing or
 // non-positive cost -- never a guessed cost basis.
+// The plain open-item price, made aware of what the player paid when they hold the item.
+//
+// Reported from the live client, and it cost GP: a player holding an Eclipse Moon chestplate (broken)
+// bought at 595,350 opened a sell offer, and the offer prompt's hint and fill hotkey gave the market's
+// current sell price -- also 595,350 -- with no warning, because this lookup has never known anyone's
+// cost. Selling there lost exactly the tax, 11,907. The loss-aware version existed only in the
+// sidebar's holding reminder, which appeared too late.
+//
+// Same arithmetic as computeHoldingSuggestion, deliberately: the prompt and the sidebar must never
+// disagree about whether a sale loses GP. A warning, never a block -- the price is still offered,
+// exactly as the standing warn-don't-block rule requires, with the break-even beside it. Returns the
+// price unchanged when the cost is unknown: never a guessed cost basis.
+export function withCostBasis(openItemPrice, unitCost, quantity = 1) {
+  if (!openItemPrice || !Number.isFinite(unitCost) || unitCost <= 0) return openItemPrice;
+  const breakEvenPrice = breakEvenSellPrice(openItemPrice.itemId, unitCost);
+  const tax = estimateUnitTax(openItemPrice.itemId, openItemPrice.sellPrice);
+  const netPerUnit = openItemPrice.sellPrice - unitCost - tax;
+  const held = Number.isFinite(quantity) && quantity > 0 ? quantity : 1;
+  return {
+    ...openItemPrice,
+    // Marks it as a sale of stock the player holds, which is what lets the prompt's existing loss
+    // warning fire. Matching to the open offer is by item ID alone, so a buy prompt is unaffected.
+    action: 'sell',
+    breakEvenPrice,
+    lossIfSoldNow: netPerUnit < 0 ? Math.round(Math.abs(netPerUnit) * held) : null,
+  };
+}
+
 export function breakEvenSellPrice(itemId, unitCost) {
   if (!Number.isFinite(unitCost) || unitCost <= 0) return null;
   const clears = p => p - estimateUnitTax(itemId, p) >= unitCost;
@@ -775,7 +869,12 @@ export function forecastFromSeries(series, horizon) {
   if (signal > threshold) { label = 'Likely rising'; dir = 1; }
   else if (signal < -threshold) { label = 'Likely falling'; dir = -1; }
   else if (momentum < -.02 && deviation < -.015 && signal >= -threshold) { label = 'Possible rebound'; dir = 0.5; }
-  return {label, dir, confidence, move: signal, volatility, deviation, imbalance};
+  // noise/threshold are returned so a caller can judge an outcome by the same rule this function
+  // predicts by: it calls "rising" when the signal clears `threshold`, so a realised move is only
+  // counted as a rise when it clears the same bar. Without that, calibration would be scoring the
+  // model against a different definition of "moved" than the one it uses, and the accuracy number
+  // would mean nothing. Per item and per moment by construction, never a flat percentage.
+  return {label, dir, confidence, move: signal, volatility, deviation, imbalance, noise, threshold};
 }
 
 // Which Wiki /timeseries timestep to fetch for a given forecast horizon -- mirrors the scanner's own
@@ -863,6 +962,33 @@ export function slotCapacity(freeRaw, collectableRaw) {
   return {free, collectable, full, tight: free === 0 && !full};
 }
 
+// Two different questions about what the player already has on, which an earlier version tangled
+// together -- and the tangle capped the player at FOUR slots out of eight.
+//
+//   exposure      -- every item they are committed to, held or still being bought. This is what a
+//                    new candidate must not duplicate (see correlation.mjs): an in-progress buy is
+//                    as much a position as stock in the bank.
+//   sellSlotsOwed -- how many sells need a slot they do not already have. This is the part that
+//                    was wrong. The original reasoning was "every buy needs a second slot later, to
+//                    sell what it bought", which counted each in-progress buy as an owed exit. But a
+//                    buy vacates its own slot when collected, and the sell goes straight into it: a
+//                    flip uses ONE slot at a time, buy phase then sell phase. Four buys therefore
+//                    reserved four more slots for exits they would never need, and suggestions
+//                    stopped at four -- reported by the user from the live client.
+//
+// So an exit is owed only for stock with nowhere to go: held unsold (an open position) and not
+// currently sitting in any slot at all -- bought, collected and left in the inventory. Anything in a
+// slot, finished or not, brings its own slot with it.
+export function slotExposure(openPositions, occupiedOffers, account) {
+  const mine = x => !account || x.account === account;
+  const held = (openPositions || []).filter(mine).map(p => p.itemId);
+  const occupied = (occupiedOffers || []).filter(mine);
+  const inASlot = new Set(occupied.map(o => o.itemId));
+  const buying = occupied.filter(o => ['BUYING', 'BOUGHT'].includes(o.state)).map(o => o.itemId);
+  const owed = [...new Set(held)].filter(id => !inASlot.has(id));
+  return {exposure: new Set([...held, ...buying]), owedItems: owed, sellSlotsOwed: owed.length};
+}
+
 // One sentence to append to a suggestion's reasoning when the GE is tight (see slotCapacity).
 // Returns null when there is nothing to say, so the caller appends nothing.
 export function slotNote(capacity) {
@@ -882,13 +1008,39 @@ export const UNFAVORABLE_FORECAST_CONFIDENCE = 55;
 // Human-readable horizon text folded into a forecast-carrying suggestion's reasoning.
 export const FORECAST_HORIZON_LABEL = {'1h': '~1 hour', '6h': '~6 hours', overnight: 'overnight'};
 
+// Whether an unfavourable forecast is allowed to DROP a candidate. Currently false, and that is a
+// measurement, not an opinion: replaying this same forecaster over 90 days of archived prices
+// (bridge/forecastCalibration.mjs, 42,659 non-overlapping predictions across 120 items) found its
+// directional calls inverted -- "likely falling" was followed by a rise 41.1% of the time against a
+// fall 18.4%, and the candidates this policy drops went on to move +4.261% over the next six hours
+// while the ones it kept moved +0.553%. Switched on, it systematically discarded the best
+// candidates it saw. Verified with a shuffled control that landed exactly on the base rate, with
+// bid-ask bounce ruled out, and holding across both halves of the period, three disjoint item sets
+// and a second horizon.
+//
+// So the signal does not get to remove a trade from consideration until it has earned it. The
+// forecast is still SHOWN -- never silently suppressed, and the player still decides -- which is the
+// same fail-open rule every other check here follows. Flip this back to true only when a calibration
+// run says the forecast predicts direction better than the base rate, and never on a single
+// backtest: a predictor that measures as backwards is not a predictor to trust inverted either.
+export const FORECAST_MAY_DROP_CANDIDATES = false;
+
 // Pure decision: given a forecast (or null/undefined -- no data) and a policy ('warn'|'skip'),
 // should the caller keep this candidate or retry with the next-best one? Split out from
 // pickWithForecast below purely so the threshold logic itself has a direct, trivial unit test.
 export function decideForecast(forecast, policy) {
   if (!forecast) return 'keep';
+  if (!FORECAST_MAY_DROP_CANDIDATES) return 'keep';
   if (policy === 'skip' && forecast.dir === -1 && forecast.confidence >= UNFAVORABLE_FORECAST_CONFIDENCE) return 'retry';
   return 'keep';
+}
+
+// What to say when the player asked for skipping and it is deliberately not happening. Silence
+// would be a setting that quietly does nothing; this states the reason in the wording they see.
+export function forecastPolicyNote(policy) {
+  return policy === 'skip' && !FORECAST_MAY_DROP_CANDIDATES
+    ? 'Note: "skip on an unfavourable forecast" is currently inactive. Measured against 90 days of price history, this forecast\'s direction calls were wrong more often than chance, and skipping on them threw away better trades than it avoided -- so the forecast is shown but no longer removes a candidate.'
+    : null;
 }
 
 // Generic forecast-aware retry driver shared by the personal-history and market-wide "buy" tiers in
@@ -911,7 +1063,11 @@ export function decideForecast(forecast, policy) {
 // either found nothing, or every attempt so far failed forecast/cushion) -- the caller falls
 // through to its own next fallback tier exactly as when nothing was eligible before either of these
 // existed.
-export async function pickWithForecast({rank, forecastFor, policy, horizon, cushionFor, requireCushion, blocklist, maxAttempts = 3}) {
+export async function pickWithForecast({rank, forecastFor, policy, horizon, cushionFor, requireCushion,
+  correlationFor, blocklist, maxAttempts = 3, onBlocked}) {
+  // What was held back and why, so the caller can say so rather than silently returning nothing --
+  // "nothing passes your settings" would be wrong when a real candidate was set aside deliberately.
+  const blocked = [];
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const candidate = rank(blocklist);
     if (!candidate) return null;
@@ -920,7 +1076,17 @@ export async function pickWithForecast({rank, forecastFor, policy, horizon, cush
       const forecast = await forecastFor(candidate.itemId);
       if (forecast) {
         candidate.forecast = forecast;
-        candidate.reasoning += ` Price forecast (${FORECAST_HORIZON_LABEL[horizon] || horizon}): ${forecast.label}, ${forecast.confidence}% confidence.`;
+        // The direction label is deliberately NOT shown. Calibration over 90 days found it wrong
+        // more often than chance -- "Likely rising" was followed by a fall 43.6% of the time -- so
+        // printing it next to a buy suggestion would hand the player a prediction measured to be
+        // misleading, hedged wording or not. What the same signal does predict, and cleanly, is
+        // which side of the flip completes (see fillOutlook.mjs), so that is what it now says.
+        const outlook = fillOutlook(forecast, undefined, horizon);
+        candidate.fillOutlook = outlook;
+        const sentence = fillOutlookSentence(outlook);
+        if (sentence) candidate.reasoning += ` ${sentence}`;
+        const note = forecastPolicyNote(policy);
+        if (note) candidate.reasoning += ` ${note}`;
         if (decideForecast(forecast, policy) === 'retry') { blocklist.add(candidate.itemId); continue; }
       }
     }
@@ -931,7 +1097,22 @@ export async function pickWithForecast({rank, forecastFor, policy, horizon, cush
         if (cushion.note) candidate.reasoning += ` ${cushion.note}`;
       }
     }
+    // Same retry path as the cushion, for the same reason: several slots in items that move
+    // together is one position wearing several hats. Measured per pair from the price archive (see
+    // correlation.mjs), never inferred from item names -- the measurement showed names get it
+    // exactly wrong. A null result means the pair could not be compared and never blocks anything.
+    if (correlationFor) {
+      const correlated = await correlationFor(candidate);
+      if (correlated && correlated.blocked) {
+        blocked.push({itemId: candidate.itemId, reason: correlated.note});
+        blocklist.add(candidate.itemId);
+        continue;
+      }
+    }
     return candidate;
   }
+  // Ran out of attempts. If everything that was tried got held back for a stated reason, say so --
+  // a candidate deliberately set aside is a different answer from nothing being eligible.
+  if (blocked.length && onBlocked) onBlocked(blocked);
   return null;
 }

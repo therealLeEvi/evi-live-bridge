@@ -83,7 +83,11 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
       const cookie=(req.headers.cookie||'').split(';').map(s=>s.trim()).find(s=>s.startsWith('evi='))?.slice(4);
       const ui=same(cookie,secrets.scanner);
       const body=async()=>{
-        if(req.headers['content-type']!=='application/json')throw Error('JSON required');
+        // Media type only: a Content-Type may legitimately carry parameters, and an exact-match
+        // check rejected "application/json; charset=utf-8" with a 400 -- which is exactly what
+        // OkHttp sends for a string body, and what broke every observation the moment the plugin
+        // moved to RuneLite's HTTP client. Still strict about the type itself.
+        if((req.headers['content-type']||'').split(';')[0].trim().toLowerCase()!=='application/json')throw Error('JSON required');
         let n=0;const chunks=[];
         for await(const chunk of req){n+=chunk.length;if(n>32768)throw Error('Request too large');chunks.push(chunk);}
         return JSON.parse(Buffer.concat(chunks).toString('utf8'));

@@ -25,6 +25,16 @@ test('loopback bridge protects personal scanner, API, origins, keys and static p
   assert.equal((await get('/api/flips',{method:'POST',headers:{...headers,Cookie:cookie},body:'{}'})).status,403);
   assert.equal((await get('/api/events',{method:'POST',headers:{...headers,Authorization:'Bearer '+app.secrets.scanner},body:'{}'})).status,401);
   assert.equal((await get('/api/events',{method:'POST',headers:{...headers,Authorization:'Bearer '+app.secrets.plugin},body:'{}'})).status,400);
+  // A Content-Type may carry parameters, and an exact-match check rejected the plugin's own posts
+  // with a 400 the moment it moved to RuneLite's OkHttpClient, which sends
+  // "application/json; charset=utf-8" for a string body. The media type is what matters; a 400 here
+  // must mean the BODY was bad (as above), never the header's charset.
+  // Both cases answer 400, so the status alone proves nothing -- the error text is what says whether
+  // the header or the body was the problem.
+  const postEvents=async ct=>(await (await get('/api/events',{method:'POST',headers:{'Content-Type':ct,Origin:app.origin,Authorization:'Bearer '+app.secrets.plugin},body:'{}'})).json()).error;
+  assert.notEqual(await postEvents('application/json; charset=utf-8'),'JSON required','a charset parameter must be accepted, leaving only the empty body to reject');
+  assert.notEqual(await postEvents('APPLICATION/JSON'),'JSON required','the media type is case-insensitive per RFC 9110');
+  assert.equal(await postEvents('text/plain'),'JSON required','a genuinely wrong media type is still refused');
   assert.equal((await get('/api/suggestion')).status,401);
   assert.equal((await get('/api/suggestion',{headers:{Authorization:'Bearer '+app.secrets.scanner}})).status,401);
   assert.equal((await get('/api/suggestion/personal-use',{method:'POST',headers,body:'{}'})).status,401);

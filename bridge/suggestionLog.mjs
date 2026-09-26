@@ -11,13 +11,37 @@ import path from 'node:path';
 const REPEAT_MS = 30 * 60 * 1000;
 const MAX_BYTES = 50 * 1024 * 1024;
 
+// What each safety check concluded about a suggestion, recorded beside it. The log already held every
+// pick and the settings behind it, but not whether a check had flagged it -- so there was no way to
+// show later whether the checks were RIGHT: did demoted picks really do worse, did exit-risk warnings
+// really precede unsold stock? That is the evidence EVI's "every claim is measured" standard needs,
+// and it only exists if it is recorded from the start. Numbers are stored as measured, rounded to whole
+// GP; a check that did not run is recorded as null, never as a pass.
+export function checksOf(s) {
+  if (!s) return null;
+  const support = s.sellSupport;
+  const outlook = s.fillOutlook;
+  return {
+    demoted: !!s.demoted,
+    sellSupport: support ? {
+      supported: !!support.supported, buyers: support.units ?? null, hours: support.hours ?? null,
+      averagePaid: Number.isFinite(support.averagePaid) ? Math.round(support.averagePaid) : null,
+      netAtAverage: Number.isFinite(support.netAtAverage) ? Math.round(support.netAtAverage) : null,
+    } : null,
+    exitRisk: outlook ? {buy: outlook.buy, sell: outlook.sell, worst: outlook.worst, notable: !!outlook.notable} : null,
+  };
+}
+
 export function createSuggestionLog(dir) {
   const file = path.join(dir, 'suggestion-log.jsonl');
   const last = new Map(); // account -> {key, at}
   function record({account, suggestion, now = Date.now(), context = {}}) {
     if (!suggestion) return false;
     const s = suggestion;
-    const key = [s.itemId, s.action, s.source, s.quantity, s.buyPrice, s.sellPrice].join('|');
+    // Which picks were demoted counts too: the same pick shown after a different item was pushed down
+    // is a different call by the checks, and would otherwise go unrecorded.
+    const demotedIds = (context.demotedPicks || []).map(p => p.itemId).join(',');
+    const key = [s.itemId, s.action, s.source, s.quantity, s.buyPrice, s.sellPrice, demotedIds].join('|');
     const who = account || '';
     const prev = last.get(who);
     if (prev && prev.key === key && now - prev.at < REPEAT_MS) return false;
@@ -27,6 +51,7 @@ export function createSuggestionLog(dir) {
       quantity: s.quantity, buyPrice: s.buyPrice, sellPrice: s.sellPrice,
       breakEvenPrice: s.breakEvenPrice ?? null, lossIfSoldNow: s.lossIfSoldNow ?? null, persisted: !!s.persisted,
       forecast: s.forecast ? {label: s.forecast.label, confidence: s.forecast.confidence} : null,
+      checks: checksOf(s),
       ...context,
     };
     try {

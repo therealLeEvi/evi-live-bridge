@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {personalHistory, computeSuggestion, computeMarketSuggestion, computeHoldingSuggestion, computeInventorySuggestion, computePushedSuggestion, pickPersistentOpenPosition, lookupItemPrice, forecastFromSeries, timestepForHorizon, UNFAVORABLE_FORECAST_CONFIDENCE, decideForecast, forecastPolicyNote, FORECAST_MAY_DROP_CANDIDATES, pickWithForecast, estimateOfferFill, estimateVolatility, marginClearsCushion, MARGIN_CUSHION_MULTIPLIER, breakEvenSellPrice, priceAgeMinutes, MAX_PRICE_AGE_MINUTES, slotCapacity, slotNote, slotExposure, withCostBasis, sellPriceSupport, sellSupportNote, volumeReadingFor, GE_SLOTS} from '../bridge/suggestions.mjs';
+import {personalHistory, computeSuggestion, computeMarketSuggestion, computeHoldingSuggestion, computeInventorySuggestion, computePushedSuggestion, pickPersistentOpenPosition, lookupItemPrice, forecastFromSeries, timestepForHorizon, UNFAVORABLE_FORECAST_CONFIDENCE, decideForecast, forecastPolicyNote, FORECAST_MAY_DROP_CANDIDATES, pickWithForecast, estimateOfferFill, estimateVolatility, marginClearsCushion, MARGIN_CUSHION_MULTIPLIER, breakEvenSellPrice, priceAgeMinutes, MAX_PRICE_AGE_MINUTES, slotCapacity, slotNote, slotExposure, withCostBasis, heldCostBasis, sellPriceSupport, sellSupportNote, volumeReadingFor, GE_SLOTS, mergeArchiveHours, volumeShareForDuration, limitAllowance, BULK_MIN_LIMIT, focusAllows, FOCUSES, resolveFocus} from '../bridge/suggestions.mjs';
 
 const now = 1700000000000;
 function flip(o = {}) {
@@ -1012,11 +1012,11 @@ test('buy limit: quantity is reduced to what is left of the 4-hour limit, and an
   const limitFor = id => id === 1 ? {limit: 10000, remaining: 250} : null;
   const m = computeMarketSuggestion(mapping(), fresh(), volumes(), {limitFor, blocklist: new Set([2]), maxVolumeShare: 0});
   assert.equal(m.quantity, 250);
-  assert.match(m.reasoning, /left of this item's 4-hour GE buy limit/);
+  assert.match(m.reasoning, /left of this item's GE buy limit over your trade window/);
   const tighter = id => id === 1 ? {limit: 10000, remaining: 100} : null; // below the usual size of 150
   const p = computeSuggestion(proven(), fresh(), Date.now(), {limitFor: tighter});
   assert.equal(p.quantity, 100);
-  assert.match(p.reasoning, /left of this item's 4-hour GE buy limit/);
+  assert.match(p.reasoning, /left of this item's GE buy limit over your trade window/);
   const used = id => ({limit: 10000, remaining: 0});
   assert.equal(computeMarketSuggestion(mapping(), fresh(), volumes(), {limitFor: used, blocklist: new Set([2]), maxVolumeShare: 0}), null);
   assert.equal(computeSuggestion(proven(), fresh(), Date.now(), {limitFor: used}), null);
@@ -1089,6 +1089,42 @@ test('market: the default volume-share cap is applied unless a caller opts out',
   assert.equal(capped.quantity, 50);
   assert.match(capped.reasoning, /10% of this item's recent hourly trading/);
   assert.equal(computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2]), maxVolumeShare: 0}).quantity, 10000);
+});
+
+// Measured in tools/fill-by-size.mjs over 427 of this account's own offers: with a cancellation
+// treated as "stopped watching" rather than a failure, an order up to half an item's hourly volume
+// filled about as often within 12 hours (70-82%) as a small one (82%), while anything past that fell
+// away (49% at 50-100%, 25% past 200%). At 6 hours the larger sizes were already worse, and at 1 hour
+// only the smallest held up -- hence steps rather than one flat 10%.
+test("sizing: how much of an hour's trading one order may be depends on how long the player will wait", () => {
+  assert.equal(volumeShareForDuration(undefined), 0.10, 'no duration set: unchanged from before');
+  assert.equal(volumeShareForDuration(30), 0.10);
+  assert.equal(volumeShareForDuration(5 * 60), 0.10, 'under six hours keeps the tight cap');
+  assert.equal(volumeShareForDuration(6 * 60), 0.25);
+  assert.equal(volumeShareForDuration(12 * 60), 0.50);
+  assert.equal(volumeShareForDuration(24 * 60), 0.50, "never past half an hour's volume on this evidence");
+  assert.equal(volumeShareForDuration(0), 0.10);
+});
+
+test('sizing: a twelve-hour trade may be five times the order a one-hour trade may be', () => {
+  // volumes() is 500/hour. 10% = 50 units; 50% = 250.
+  const short = computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2]), targetDurationMinutes: 60});
+  const long = computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2]), targetDurationMinutes: 12 * 60});
+  assert.equal(short.quantity, 50);
+  assert.equal(long.quantity, 250);
+  assert.match(long.reasoning, /50% of this item's recent hourly trading[^.]*over your 12-hour trade window/);
+  assert.match(short.reasoning, /10% of this item's recent hourly trading/);
+  assert.doesNotMatch(short.reasoning, /trade window/, 'the unchanged 10% cap says nothing new');
+  // The player's own history is sized the same way.
+  const vols = volumes({'1': {highPriceVolume: 300, lowPriceVolume: 300}});
+  assert.equal(computeSuggestion([flip(), flip({quantity: 200})], fresh(), Date.now(), {volumes: vols, targetDurationMinutes: 12 * 60}).quantity, 150,
+    'half of 300 is 150, which is the usual size here, so nothing is capped');
+  assert.equal(computeSuggestion([flip(), flip({quantity: 200})], fresh(), Date.now(), {volumes: vols}).quantity, 30, 'with no duration set, the old 10% still applies');
+  // An explicit override still turns the share cap off entirely; what is left is the fill-time
+  // estimate for that same window, which is a different cap with its own wording.
+  const off = computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2]), targetDurationMinutes: 12 * 60, maxVolumeShare: 0});
+  assert.ok(off.quantity > 250, 'no share cap left: ' + off.quantity);
+  assert.doesNotMatch(off.reasoning, /hourly trading/);
 });
 
 test('personal history: maxStackShare caps a proven flip the same way, and drops what one unit would overcommit', () => {
@@ -1165,6 +1201,39 @@ test('open item price: warns with the break-even when selling a held item would 
   assert.equal(warned.lossIfSoldNow, sidebar.lossIfSoldNow);
 });
 
+// Asked for by the user: collecting 2,200 of a 12,001 diamond dragon bolt order while the rest keeps
+// filling. The FIFO journal only admits a purchase once the offer finishes, so the prompt had no idea
+// what those collected bolts cost.
+test('held cost: a buy order still running counts, at what has actually been paid so far', () => {
+  const running = {itemId: 9244, account: 'a', state: 'BUYING', filled: 2200, spent: 2200 * 1500, total: 12001};
+  const basis = heldCostBasis([], [running], 9244, 'a');
+  assert.equal(basis.unitCost, 1500, 'the average price actually paid on the open order');
+  assert.equal(basis.quantity, 2200);
+  // End to end with the prompt's warning: selling below that price now warns.
+  const warned = withCostBasis({itemId: 9244, buyPrice: 1450, sellPrice: 1480}, basis.unitCost, basis.quantity);
+  assert.ok(warned.lossIfSoldNow > 0, 'selling below what was paid on a still-running order must warn');
+  assert.ok(warned.breakEvenPrice > 1500);
+});
+
+test('held cost: finished lots and a running order average together, never double counted', () => {
+  const lot = {itemId: 9244, account: 'a', unitCost: 1400, remaining: 1000};
+  const running = {itemId: 9244, account: 'a', state: 'BUYING', filled: 1000, spent: 1000 * 1600};
+  const basis = heldCostBasis([lot], [running], 9244, 'a');
+  assert.equal(basis.quantity, 2000);
+  assert.equal(basis.unitCost, 1500, 'each unit at its own price, averaged over everything held');
+});
+
+test('held cost: only buys that filled, only this item and account, and nothing known means null', () => {
+  const offers = [
+    {itemId: 9244, account: 'a', state: 'BUYING', filled: 0, spent: 0},          // nothing bought yet
+    {itemId: 9244, account: 'a', state: 'SELLING', filled: 50, spent: 80000},     // a sale, not a cost
+    {itemId: 9244, account: 'b', state: 'BUYING', filled: 10, spent: 15000},      // another account
+    {itemId: 4151, account: 'a', state: 'BUYING', filled: 1, spent: 1500000},     // another item
+  ];
+  assert.equal(heldCostBasis([], offers, 9244, 'a'), null, 'no price ever guessed from offers that bought nothing here');
+  assert.equal(heldCostBasis(null, null, 9244, 'a'), null);
+});
+
 test('open item price: a profitable sale carries its break-even and no loss', () => {
   const r = withCostBasis({itemId: 29049, buyPrice: 595350, sellPrice: 618004}, 595350, 1);
   assert.equal(r.lossIfSoldNow, null);
@@ -1222,6 +1291,50 @@ test('sell support: no series is no view, never a guess', () => {
   assert.equal(Math.round(s.averagePaid), 640000);
 });
 
+// Reported live: EVI's top personal picks included a Mummy's head whose sell price was 58.6 hours old
+// and nobody had bought for 12 hours. A warning alone left it ranked first, so a failing pick is now
+// demoted below the next candidates -- never hidden.
+const stalePick = id => ({itemId: id, action: 'buy', reasoning: `pick ${id}`});
+const supportFails = ids => async c => ids.includes(c.itemId) ? {warning: `Warning: item ${c.itemId} rests on very few trades.`, detail: {units: 0}} : null;
+
+test('demotion: a pick failing the buyer check makes way for the next one that passes', async () => {
+  const blocklist = new Set();
+  const rank = bl => [1, 2, 3].filter(id => !bl.has(id)).map(stalePick)[0] || null;
+  const result = await pickWithForecast({rank, supportFor: supportFails([1]), blocklist, policy: 'warn', horizon: null});
+  assert.equal(result.itemId, 2, 'the stale top pick loses its place to the next candidate that holds up');
+  assert.ok(!result.demoted);
+  assert.ok(!/Warning/.test(result.reasoning), 'and the one shown carries no warning, because it passed');
+});
+
+test('demotion: a pick pushed down is reported even when a better one replaces it, so it can be logged', async () => {
+  const seen = [];
+  const rank = bl => [1, 2, 3].filter(id => !bl.has(id)).map(stalePick)[0] || null;
+  const result = await pickWithForecast({rank, supportFor: supportFails([1]), blocklist: new Set(), policy: 'warn', horizon: null,
+    onDemoted: c => seen.push(c.itemId)});
+  assert.equal(result.itemId, 2);
+  assert.deepEqual(seen, [1], 'otherwise the check is invisible exactly when it works');
+});
+
+test('demotion: when nothing passes, the best demoted pick is still shown, warned and explained', async () => {
+  const rank = bl => [1, 2, 3].filter(id => !bl.has(id)).map(stalePick)[0] || null;
+  const result = await pickWithForecast({rank, supportFor: supportFails([1, 2, 3]), blocklist: new Set(), policy: 'warn', horizon: null});
+  assert.equal(result.itemId, 1, 'never left with nothing because of this check -- the best-ranked comes back');
+  assert.equal(result.demoted, true);
+  assert.match(result.reasoning, /^Warning: item 1/, 'the warning leads the reasoning');
+  assert.match(result.reasoning, /No other candidate passed this check right now/);
+});
+
+test('demotion: no reading means no demotion, and a sell is never checked', async () => {
+  const pick = stalePick(1);
+  const noView = await pickWithForecast({rank: () => pick, supportFor: async () => null, blocklist: new Set(), policy: 'warn', horizon: null});
+  assert.equal(noView, pick, 'a failed fetch or missing history demotes nothing -- fail open');
+  let checked = 0;
+  const sell = {itemId: 9, action: 'sell', reasoning: 'holding'};
+  const r = await pickWithForecast({rank: () => sell, supportFor: async () => { checked++; return {warning: 'x'}; }, blocklist: new Set(), policy: 'warn', horizon: null});
+  assert.equal(r, sell);
+  assert.equal(checked, 0, 'this checks buys only: a sell reminder has nothing left to buy');
+});
+
 test('volume reading: a measured zero constrains sizing, a missing reading does not', () => {
   // Listed with 0 bought and 1 sold: exactly what the bridge saw for the chestplate at 12:47.
   assert.equal(volumeReadingFor({'29049': {highPriceVolume: 0, lowPriceVolume: 1}}, 29049), 0);
@@ -1267,4 +1380,87 @@ test('slot capacity: an unknown count never invents a constraint', () => {
   assert.equal(partial.tight, true);
   assert.match(slotNote(partial), /collect or cancel an offer/);
   assert.equal(GE_SLOTS, 8);
+});
+// Measured 19 Sep 2026: the Wiki's per-item series still lacked the newest complete hour at ten past
+// the next one, while the archive had it -- so the live check often saw 11 of its 12 hours.
+test('sell support: the archive fills the hour the Wiki series has not published yet', () => {
+  const H = Date.UTC(2026, 8, 19, 3) / 1000, nowMs = (H + 600) * 1000;
+  const series = Array.from({length: 11}, (_, i) => ({timestamp: H - (12 - i) * 3600, avgHighPrice: 615000, highPriceVolume: 2}));
+  const newest = {ts: H - 3600, d: {'29049': [580000, 40, 570000, 30]}};
+  const merged = mergeArchiveHours(series, [newest, {ts: H - 7200, d: {}}], 29049);
+  assert.equal(merged.length, 12, 'the missing hour is added; an hour the item did not trade in adds nothing');
+  assert.deepEqual(merged.at(-1), {timestamp: H - 3600, avgHighPrice: 580000, highPriceVolume: 40, avgLowPrice: 570000, lowPriceVolume: 30});
+  const without = sellPriceSupport(series, 29049, 595350, {nowMs});
+  const withIt = sellPriceSupport(merged, 29049, 595350, {nowMs});
+  assert.equal(without.units, 22);
+  assert.equal(withIt.units, 62, 'the busiest hour was the one being missed');
+  assert.equal(without.supported, true);
+  assert.equal(withIt.supported, false, 'and here it changes the call');
+  assert.deepEqual(mergeArchiveHours(null, null, 1), [], 'nothing in, nothing out');
+});
+
+
+// The buy limit resets four hours after the first purchase of a window (the OSRS Wiki's own wording),
+// so a 12-hour trade spans three windows -- capping every order at one limit left two thirds of a long
+// trade's allowance unused on exactly the bulk items where the limit binds.
+test('buy limit: a trade window spanning several resets allows one limit per window that opens in time', () => {
+  const H = 3600000, now = Date.UTC(2026, 8, 21, 12);
+  assert.equal(limitAllowance({limit: 11000, targetDurationMinutes: undefined, now}), 11000, 'no duration: one window, as before');
+  assert.equal(limitAllowance({limit: 11000, targetDurationMinutes: 60, now}), 11000, 'an hour is inside one window');
+  assert.equal(limitAllowance({limit: 11000, targetDurationMinutes: 12 * 60, now}), 33000, 'windows open at 0, 4h and 8h: three limits');
+  assert.equal(limitAllowance({limit: 11000, targetDurationMinutes: 10 * 60, now}), 33000, 'the third window opens at 8h, inside 10h');
+  assert.equal(limitAllowance({limit: 11000, targetDurationMinutes: 8 * 60, now}), 22000, 'a window opening exactly at the deadline adds nothing');
+  assert.equal(limitAllowance({limit: 11000, targetDurationMinutes: 24 * 60, now}), 66000);
+  // Part of the current window already used, resetting in an hour: what is left now, plus the windows
+  // opening at 1h, 5h and 9h inside a 12-hour trade.
+  assert.equal(limitAllowance({limit: 11000, used: 8000, windowEndsAt: now + H, targetDurationMinutes: 12 * 60, now}), 3000 + 3 * 11000);
+  // Used up, resetting in three hours, on a two-hour trade: nothing more is buyable in time.
+  assert.equal(limitAllowance({limit: 11000, used: 11000, windowEndsAt: now + 3 * H, targetDurationMinutes: 120, now}), 0);
+  assert.equal(limitAllowance({limit: 0, targetDurationMinutes: 720, now}), null, 'unknown limit: no constraint invented');
+});
+
+test('buy limit: the market tier starts a long trade from the whole allowance, and the volume cap still binds', () => {
+  // volumes() is 500/hour; at 12 hours the volume cap is 50%, so 250 -- far below three limits of 10,000.
+  const long = computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2]), targetDurationMinutes: 12 * 60});
+  assert.equal(long.quantity, 250, 'the market, not the limit, is what binds here');
+  // With the volume cap switched off, the allowance itself shows through.
+  const uncapped = computeMarketSuggestion(mapping(), fresh(), volumes({'1': {highPriceVolume: 1e7, lowPriceVolume: 1e7}}),
+    {blocklist: new Set([2]), targetDurationMinutes: 12 * 60, maxVolumeShare: 0});
+  assert.equal(uncapped.quantity, 30000, 'three windows of the 10,000 limit');
+});
+
+
+// Opt-in focus on items bought by the thousand. The user found the market for gear crowded; consumables
+// and ammunition carry buy limits of 2,000-18,000, gear 4-125, so the limit draws the line.
+test('bulk focus: only items the GE sells by the thousand are suggested, and it is off unless asked for', () => {
+  const items = mapping([{id: 3, name: 'Steel cannonball', limit: 11000}]);
+  const all = computeMarketSuggestion(items, fresh(), volumes(), {maxVolumeShare: 0});
+  const bulkOnly = id => !(items.find(m => m.id === id)?.limit >= BULK_MIN_LIMIT);
+  const bulk = computeMarketSuggestion(items, fresh(), volumes(), {maxVolumeShare: 0, focusBlocked: bulkOnly});
+  assert.ok(all, 'without the focus, anything eligible can be suggested');
+  if (bulk) assert.ok(items.find(m => m.id === bulk.itemId).limit >= BULK_MIN_LIMIT, 'with it, never an item with a small limit');
+  // The personal tier obeys it too: a proven item with a small limit is not offered under the focus.
+  const personal = computeSuggestion(proven(), fresh(), Date.now(), {focusBlocked: () => true});
+  assert.equal(personal, null, 'nothing passes when every item is outside the focus');
+  assert.equal(BULK_MIN_LIMIT, 1000);
+});
+
+
+test("focus: gear and bulk split by the item's own buy limit, and an unknown limit fits neither", () => {
+  assert.equal(focusAllows('any', undefined), true);
+  assert.equal(focusAllows('bulk', 11000), true, 'Steel cannonball');
+  assert.equal(focusAllows('bulk', 8), false, 'Spiked manacles');
+  assert.equal(focusAllows('gear', 8), true, 'Spiked manacles');
+  assert.equal(focusAllows('gear', 11000), false);
+  assert.equal(focusAllows('gear', undefined), false, 'cannot be shown to be gear');
+  assert.equal(focusAllows('bulk', undefined), false, 'cannot be shown to be bulk');
+  assert.deepEqual(FOCUSES, ['any', 'bulk', 'gear']);
+});
+
+
+test("focus: the plugin's own setting wins for its request, and 'same as scanner' defers to the stored switch", () => {
+  assert.equal(resolveFocus('gear', 'bulk'), 'gear', 'the plugin named one');
+  assert.equal(resolveFocus(null, 'bulk'), 'bulk', "the plugin sent nothing: the scanner's switch applies");
+  assert.equal(resolveFocus('nonsense', 'bulk'), 'bulk', 'an unknown value is ignored, not adopted');
+  assert.equal(resolveFocus(null, undefined), 'any');
 });

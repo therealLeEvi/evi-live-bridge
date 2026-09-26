@@ -122,7 +122,12 @@ test('a buy flagged personal use drops out of open positions and never counts to
   assert.equal(state.autoFlips.length,0,'the personal-use buy can never be matched into a flip, even once sold');
   assert.equal(state.netProfit,0,'a personal-use sale must never inflate or deflate the profit total');
   assert.equal(state.autoUnmatchedSells.length,1,'the sale itself still shows up, just as unmatched, not silently dropped');
+  // The manual review path must agree. An Oathplate armour set bought to wear was saved here as a
+  // reviewed flip and put -2.9m into a profit total that was otherwise +2.0m.
+  assert.throws(()=>store.confirm({buyId:'buy-1',sellId:'sell-1'}),/marked as personal use, so it is not a flip/);
+  assert.equal(store.state().netProfit,0,'a refused review changes nothing');
   store.markPersonalUse({buyId:'buy-1',personal:false});
+  assert.equal(store.confirm({buyId:'buy-1',sellId:'sell-1'}).buyId,'buy-1','unmarked, it can be reviewed as a flip after all');
   assert.deepEqual(store.state().personalUseBuyIds,[]);
   assert.deepEqual(store.state().personalUseItemIds,[]);
 });
@@ -373,7 +378,24 @@ test('data health: what the total leaves out is counted exactly, never estimated
   assert.deepEqual(h.openItemIds.sort((a,b)=>a-b),[810,32032],'two lots of darts are one item');
   assert.equal(h.unmatchedSales,3);
   assert.equal(h.unmatchedGross,1750000,'a sale with no reported GP adds nothing rather than a guess');
-  assert.deepEqual(dataHealthOf({}),{openPositions:0,openCost:0,openItemIds:[],unmatchedSales:0,unmatchedGross:0});
+  assert.deepEqual(dataHealthOf({}),{openPositions:0,openCost:0,openItemIds:[],unmatchedSales:0,unmatchedGross:0,personalUseSales:0,personalUseGross:0});
+});
+test('data health: sales of stock marked as personal use are counted apart, not as missing purchases',()=>{
+  const sell=(o)=>({account:'a',itemId:4151,filled:1,spent:1500000,completedAt:5000,...o});
+  const h=dataHealthOf({unmatchedSells:[
+    sell({}),                                            // the flagged whip, sold later anyway
+    sell({itemId:810,filled:100,spent:2000}),           // darts nobody saw bought: a real gap
+  ]},[{account:'a',itemId:4151,filled:1,firstSeen:1000}]);
+  assert.equal(h.personalUseSales,1);assert.equal(h.personalUseGross,1500000);
+  assert.equal(h.unmatchedSales,1,'the real gap is still reported');assert.equal(h.unmatchedGross,2000);
+  // Never more units than the flagged buys bought; the rest stays unmatched, GP split by units.
+  const split=dataHealthOf({unmatchedSells:[sell({filled:3,spent:3000000})]},[{account:'a',itemId:4151,filled:1,firstSeen:1000}]);
+  assert.deepEqual([split.personalUseSales,split.personalUseGross,split.unmatchedSales,split.unmatchedGross],[1,1000000,1,2000000]);
+  // A flagged buy on another account, of another item, or placed after the sale explains nothing.
+  for(const b of [{account:'b',itemId:4151,filled:1,firstSeen:1000},{account:'a',itemId:11802,filled:1,firstSeen:1000},{account:'a',itemId:4151,filled:1,firstSeen:9000}])
+    assert.equal(dataHealthOf({unmatchedSells:[sell({})]},[b]).personalUseSales,0);
+  // Only the unmatched part of a partly matched sale counts, in GP too.
+  assert.equal(dataHealthOf({unmatchedSells:[sell({filled:4,spent:4000,unmatchedQty:1})]}).unmatchedGross,1000);
 });
 test('an offer with no tick information is still matched exactly as before',t=>{
   const {store}=setup(t);
@@ -391,4 +413,22 @@ test('validatePacket accepts the optional tick field, rejects nonsense, and defa
   assert.equal(without.offers.find(o=>o.offerId==='buy-1').ticksToFill,-1,'older plugins simply do not send it');
   assert.throws(()=>validatePacket(packet(1,[offer({ticksToFill:1.5})])),/ticksToFill/);
   assert.throws(()=>validatePacket(packet(1,[offer({ticksToFill:-5})])),/ticksToFill/);
+});
+
+// Reported live while training Slayer: EVI kept suggesting the player sell the Masori body (f) they
+// were wearing. It came from the idle-inventory tier -- EVI never saw it bought -- so the "Personal
+// use" button, which keys off a real buy offer, could do nothing and the suggestion returned.
+test('personal use by item: gear EVI never saw bought can be excluded for good, and put back',t=>{
+  const {store,dir}=setup(t);
+  assert.deepEqual(store.state().personalUseItemIds,[]);
+  assert.deepEqual(store.markPersonalUseItem({itemId:27241,personal:true}),{ok:true,itemId:27241,personal:true});
+  assert.deepEqual(store.state().personalUseItemIds,[27241],'the idle-inventory scan skips it from now on');
+  assert.deepEqual(store.markPersonalUseItem({itemId:27241,personal:true}),{ok:true,itemId:27241,personal:true},'saying it twice writes nothing new');
+  assert.equal(store.state().personalUseItems.length,1);
+  // It survives a restart, like every other flip-state change.
+  assert.deepEqual(new Store(dir).state().personalUseItemIds,[27241],'replayed from the journal');
+  assert.deepEqual(store.markPersonalUseItem({itemId:27241,personal:false}),{ok:true,itemId:27241,personal:false});
+  assert.deepEqual(store.state().personalUseItemIds,[],'reversible');
+  assert.throws(()=>store.markPersonalUseItem({itemId:0,personal:true}),/Invalid itemId/);
+  assert.throws(()=>store.markPersonalUseItem({itemId:27241}),/Missing personal flag/);
 });

@@ -1,6 +1,8 @@
 // Small standalone cached-fetch helper for public OSRS Wiki endpoints, used internally
 // by the suggestion engine. Same allowlisted-upstream, no-redirect, size-capped posture
 // as the /api/market/* proxy in server.mjs; kept separate so it can't regress that path.
+import {userAgent} from './userAgent.mjs';
+
 export function createMarketCache() {
   const cache = new Map();
   async function get(url, ttl) {
@@ -8,7 +10,7 @@ export function createMarketCache() {
     if (!hit || hit.until < Date.now()) {
       const pending = (async () => {
         const r = await fetch(url, {
-          headers: {'User-Agent': 'EVI-Live/3.0 (personal local OSRS market scanner)'},
+          headers: {'User-Agent': userAgent('live prices')},
           signal: AbortSignal.timeout(15000),
           redirect: 'error',
         });

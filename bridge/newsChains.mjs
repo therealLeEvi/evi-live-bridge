@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {userAgent} from './userAgent.mjs';
 import path from 'node:path';
 import {chainsForPost} from './newsChain.mjs';
 
@@ -17,7 +18,7 @@ import {chainsForPost} from './newsChain.mjs';
 
 const FEED = 'https://secure.runescape.com/m=news/latest_news.rss?oldschool=true';
 const WIKI_API = 'https://oldschool.runescape.wiki/api.php';
-const UA = 'EVI-Live/3.6 (personal local OSRS market scanner; news-to-item linkage)';
+const UA = userAgent('news-to-item linkage');
 const GAP_MS = 400;
 const MAX_POSTS = 5;            // newest few; older news is not actionable
 const STALE_MS = 12 * 3600 * 1000;

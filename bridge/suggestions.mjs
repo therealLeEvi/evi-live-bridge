@@ -121,6 +121,22 @@ export function sellPriceSupport(series, itemId, buyPrice, {hours = SELL_SUPPORT
   return {units, hours, averagePaid, netAtAverage, supported: netAtAverage > 0};
 }
 
+// Fills a Wiki /timeseries 1h series in from the local price archive. Measured 19 Sep 2026 across 8
+// items and 15 days: all 2,865 item-hours present in both were identical, but /timeseries was still
+// missing the newest complete hour at ten past the next one, while the archive had stored it five
+// minutes after it closed. So the live sell-support check often saw 11 hours out of its 12. The
+// archive's hour is used wherever it has one; an hour it lacks keeps the series' own point; an
+// archived hour in which the item did not trade adds nothing, exactly as a zero-volume hour would.
+export function mergeArchiveHours(series, buckets, itemId) {
+  const byTs = new Map((Array.isArray(series) ? series : []).map(p => [p.timestamp, p]));
+  for (const b of buckets || []) {
+    const x = b && b.d && b.d[String(itemId)];
+    if (!x) continue;
+    byTs.set(b.ts, {timestamp: b.ts, avgHighPrice: x[0], highPriceVolume: x[1], avgLowPrice: x[2], lowPriceVolume: x[3]});
+  }
+  return [...byTs.values()].sort((a, b) => a.timestamp - b.timestamp);
+}
+
 // One warning sentence, or null when the margin holds at what buyers really pay. A warning, never a
 // block: the player may know something the average doesn't, and the price is still offered.
 export function sellSupportNote(support, sellPrice) {
@@ -219,8 +235,56 @@ export const MAX_PRICE_AGE_MINUTES = 60;
 // 3. The GE's own 4-hour buy limit, via the caller's limitFor(itemId) -> {limit, remaining} | null.
 // Both are passed in as options (membersBlocked / limitFor) rather than looked up here, since only
 // the caller has the item mapping and the trade journal. See GET /api/suggestion in server.mjs.
+// How much of an item the GE will let the player buy within their own trade duration. The buy limit
+// resets fully four hours after the first purchase of a window (the Wiki's own wording), so a trade
+// the player is willing to leave for 12 hours can span three windows, not one -- and capping every
+// order at a single limit left two thirds of a long trade's allowance unused, which matters most on
+// exactly the bulk items where the limit, not the market, is what binds.
+//
+// Counted, not assumed: what is left in the current window (limit minus what EVI has seen bought),
+// plus one full limit for every further window that STARTS before the duration runs out. A window
+// that would only open after the player's own deadline adds nothing. No duration set means one
+// window, exactly as before. EVI only counts purchases it saw, so this is an upper bound on what the
+// GE allows and is only ever used to cap a quantity downwards, never to justify buying more.
+export const LIMIT_WINDOW_MS = 4 * 3600 * 1000;
+export function limitAllowance({limit, used = 0, windowEndsAt = null, targetDurationMinutes, now = Date.now()}) {
+  if (!Number.isFinite(limit) || limit <= 0) return null;
+  const inWindow = Math.max(0, limit - (used || 0));
+  const duration = Number.isFinite(targetDurationMinutes) && targetDurationMinutes > 0 ? targetDurationMinutes * 60000 : 0;
+  if (!duration) return inWindow;
+  // With no purchase in the current window, buying now starts one: windows open at 0, 4h, 8h, ...
+  // With one running, the next opens when it ends.
+  const firstReset = Number.isFinite(windowEndsAt) && windowEndsAt > now ? windowEndsAt - now : (used > 0 ? 0 : LIMIT_WINDOW_MS);
+  const further = firstReset < duration ? Math.ceil((duration - firstReset) / LIMIT_WINDOW_MS) : 0;
+  return inWindow + further * limit;
+}
+
+// An opt-in trading focus: "bulk" keeps buy suggestions to items the GE lets you buy by the thousand
+// -- consumables and ammunition, which carry buy limits of 2,000 to 18,000, where gear sits between 4
+// and 125. Drawn from the item's own buy limit, which is game data, rather than from a price or
+// profit threshold; off unless the player chooses it, since plenty of good flips are gear. An item
+// whose limit is unknown cannot be shown to be bulk and is left out under this focus.
+export const BULK_MIN_LIMIT = 1000;
+// The player's trading focus, by the item's own buy limit: "bulk" (bought by the thousand), "gear"
+// (everything with a known, smaller limit -- equipment, where limits run 4-125), or "any". Asked for so
+// the player can switch between gear flips like Spiked manacles and bulk consumables. An item whose
+// limit is unknown cannot be placed in either group, so only "any" includes it.
+export const FOCUSES = ['any', 'bulk', 'gear'];
+// Which focus applies to one request: the plugin's own setting when it names one, otherwise the
+// scanner's stored switch. An unknown value never becomes a focus of its own.
+export function resolveFocus(requested, stored) {
+  if (FOCUSES.includes(requested)) return requested;
+  return FOCUSES.includes(stored) ? stored : 'any';
+}
+export function focusAllows(focus, limit) {
+  if (focus === 'bulk') return Number.isFinite(limit) && limit >= BULK_MIN_LIMIT;
+  if (focus === 'gear') return Number.isFinite(limit) && limit > 0 && limit < BULK_MIN_LIMIT;
+  return true;
+}
+
 function gateCandidate(itemId, quantity, options) {
   if (options.membersBlocked?.(itemId)) return null;
+  if (options.focusBlocked?.(itemId)) return null;
   const limit = options.limitFor?.(itemId);
   if (!limit || !Number.isFinite(limit.remaining)) return {quantity, limited: false};
   if (limit.remaining < 1) return null; // the 4-hour limit for this item is already used up
@@ -287,7 +351,7 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
     // bought at the high side for four full hours was suggested at quantity 3, with a sell target
     // resting on a single two-unit print; the player followed it and lost the tax. See volumeReadingFor.
     const ownLiquidity = volumeReadingFor(options.volumes, h.itemId);
-    const personalVolumeShare = Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : DEFAULT_MAX_VOLUME_SHARE;
+    const personalVolumeShare = Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : volumeShareForDuration(targetDurationMinutes);
     if (ownLiquidity !== null && personalVolumeShare > 0) {
       const withinVolume = Math.max(1, Math.floor(ownLiquidity * personalVolumeShare));
       if (withinVolume < quantity) { quantity = withinVolume; shareLimited = true; }
@@ -306,7 +370,7 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
       }
       // No volume data for this item at all: leave it unconstrained -- no signal to judge it by.
     }
-    // Tradeable here, and within what's left of this item's 4-hour GE buy limit.
+    // Tradeable here, and within what's left of this item's GE buy limit over the player's trade window (see limitAllowance).
     const gated = gateCandidate(h.itemId, quantity, options);
     if (!gated) continue;
     let limitLimited = gated.limited;
@@ -328,7 +392,7 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
   if (stackLimited) notes.push(`reduced so this one trade commits at most `+Math.round(options.maxStackShare*100)+`% of your cash stack`);
   if (shareLimited) notes.push(`reduced to `+Math.round(personalShareUsed*100)+`% of this item's recent hourly trading, so the order isn't larger than the market absorbs`);
   if (durationLimited) notes.push(`reduced to fit an estimated ~${targetDurationMinutes}-minute trade`);
-  if (limitLimited) notes.push('reduced to what EVI has seen left of this item\'s 4-hour GE buy limit');
+  if (limitLimited) notes.push('reduced to what EVI has seen left of this item\'s GE buy limit over your trade window (it resets every 4 hours)');
   if (ageMinutes !== null && ageMinutes > MAX_PRICE_AGE_MINUTES)
     notes.push(`note that one side of this item's price is about ${Math.round(ageMinutes / 60)} hour(s) old, so the current spread may not be real`);
   return {
@@ -506,6 +570,31 @@ export function withCostBasis(openItemPrice, unitCost, quantity = 1) {
   };
 }
 
+// What the player has paid, on average, for the units of an item they hold -- for the offer prompt's
+// loss warning. Counts two sources:
+//   * finished purchases still held (FIFO open positions), at each lot's own unit cost;
+//   * buy offers STILL RUNNING that have filled some units. Asked for by the user, who collects
+//     part of a large order (2,200 of 12,001 diamond dragon bolts) while the rest keeps filling. The
+//     FIFO journal only admits a purchase once the offer finishes, so until then the prompt had no
+//     idea what those collected units cost and could not warn before selling them at a loss.
+// An open buy is never double counted: FIFO excludes unfinished offers, so it appears in exactly one
+// source. The average is over everything held, which is what "what did I pay for these" means at the
+// prompt; the books still match sales first-in-first-out once the order finishes. Returns null when
+// nothing held has a known price -- never a guessed cost.
+export function heldCostBasis(openPositions, activeOffers, itemId, account) {
+  const mine = x => x && x.itemId === itemId && (!account || x.account === account);
+  let units = 0, gp = 0;
+  for (const p of openPositions || []) {
+    if (!mine(p) || !(p.unitCost > 0) || !(p.remaining > 0)) continue;
+    units += p.remaining; gp += p.unitCost * p.remaining;
+  }
+  for (const o of activeOffers || []) {
+    if (!mine(o) || o.state !== 'BUYING' || !(o.filled > 0) || !(o.spent > 0)) continue;
+    units += o.filled; gp += o.spent;
+  }
+  return units > 0 ? {unitCost: gp / units, quantity: units} : null;
+}
+
 export function breakEvenSellPrice(itemId, unitCost) {
   if (!Number.isFinite(unitCost) || unitCost <= 0) return null;
   const clears = p => p - estimateUnitTax(itemId, p) >= unitCost;
@@ -602,6 +691,36 @@ const DEFAULT_MARKET_QUANTITY_CAP = 100;
 // backtest found.
 const DEFAULT_MAX_VOLUME_SHARE = 0.10;
 
+// How much of an item's hourly trading one order may be, given how long the player is willing to
+// wait. 10% at every trade length was too tight for a long one: at the player's own settings (500k+
+// profit, 12-hour trades) it put 500k out of reach on liquid items and pushed EVI towards thin,
+// stale ones instead -- exactly the items the sell-price check then has to warn about.
+//
+// Measured, not chosen (tools/fill-by-size.mjs, 427 of this account's own offers watched from
+// placement). Its point is that a cancelled order is not a failed one: most large orders here were
+// cancelled within minutes on another tool's advice, so counting them as failures understates them.
+// Treating a cancellation as "stopped watching" instead (Kaplan-Meier), the chance an order filled:
+//
+//   size of order vs the item's hourly volume     within 6h     within 12h
+//   under 10%                                        82%           82%
+//   10-25%                                           60%           70%
+//   25-50%                                           52%           82%
+//   50-100%                                          26%           49%
+//   over 200%                                        16%           25%
+//
+// So at 12 hours everything up to half an hour's volume behaves much alike and clearly better than
+// anything past it, while at 6 hours the larger sizes are already worse, and at 1 hour only the
+// smallest holds up (37% for 10-50% against 65%). Hence three steps rather than a formula: the
+// evidence supports "about the same up to 50% if you will wait half a day", not a precise curve.
+// These are upper bounds -- orders were often cancelled BECAUSE they looked slow -- so the steps stay
+// conservative, and the 10% floor is kept for anyone who has not set a duration at all.
+export function volumeShareForDuration(targetDurationMinutes) {
+  if (!Number.isFinite(targetDurationMinutes) || targetDurationMinutes <= 0) return DEFAULT_MAX_VOLUME_SHARE;
+  if (targetDurationMinutes >= 12 * 60) return 0.50;
+  if (targetDurationMinutes >= 6 * 60) return 0.25;
+  return DEFAULT_MAX_VOLUME_SHARE;
+}
+
 // The fallback this tier reaches for only when computeSuggestion above finds nothing eligible in
 // this account's own history: ranks the *entire* item catalogue by current net margin after tax,
 // gated by a minimum-hourly-volume liquidity floor so an untraded item's stale spread can't win
@@ -636,7 +755,7 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
   const maxPriceAgeMinutes = Number.isFinite(options.maxPriceAgeMinutes) ? options.maxPriceAgeMinutes : MAX_PRICE_AGE_MINUTES;
   // See the note where this is applied below: off unless the caller asks for it.
   // Defaults to DEFAULT_MAX_VOLUME_SHARE; an explicit 0 (or a negative) turns the cap off entirely.
-  const volumeShare = Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : DEFAULT_MAX_VOLUME_SHARE;
+  const volumeShare = Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : volumeShareForDuration(targetDurationMinutes);
   const maxVolumeShare = volumeShare;
   const candidates = [];
   for (const item of mapping) {
@@ -665,7 +784,9 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     if (net <= 0) continue;
     // The item's own GE buy limit when known (see DEFAULT_MARKET_QUANTITY_CAP above), else the cap.
     const limitKnown = Number.isFinite(item.limit) && item.limit > 0;
-    let quantity = Math.max(1, limitKnown ? item.limit : DEFAULT_MARKET_QUANTITY_CAP);
+    // One limit per four-hour window the player's duration spans (see limitAllowance); the account's
+    // own recorded purchases are applied afterwards by gateCandidate, and the volume cap still binds.
+    let quantity = Math.max(1, limitKnown ? limitAllowance({limit: item.limit, targetDurationMinutes}) : DEFAULT_MARKET_QUANTITY_CAP);
     const fullSize = quantity;
     let cashLimited = false;
     if (maxSpend !== undefined) {
@@ -734,9 +855,9 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     : `capped at ${fullSize.toLocaleString('en-US')} because this item's GE buy limit is unknown`);
   if (cashLimited) notes.push('capped to what your current cash stack can afford');
   if (durationLimited) notes.push(`capped to fit an estimated ~${targetDurationMinutes}-minute trade`);
-  if (limitLimited) notes.push('capped to what EVI has seen left of this item\'s 4-hour GE buy limit');
+  if (limitLimited) notes.push('capped to what EVI has seen left of this item\'s GE buy limit over your trade window (it resets every 4 hours)');
   if (stackLimited) notes.push(`capped so this one trade commits at most `+Math.round(options.maxStackShare*100)+`% of your cash stack`);
-  if (shareLimited) notes.push(`capped to ${Math.round(maxVolumeShare * 100)}% of this item's recent hourly trading, so the order isn't larger than the market absorbs`);
+  if (shareLimited) notes.push(`capped to ${Math.round(maxVolumeShare * 100)}% of this item's recent hourly trading, so the order isn't larger than the market absorbs`+(maxVolumeShare > DEFAULT_MAX_VOLUME_SHARE ? ` over your ${targetDurationMinutes >= 120 ? Math.round(targetDurationMinutes / 60) + '-hour' : targetDurationMinutes + '-minute'} trade window` : ''));
   return {
     itemId: item.id,
     name: item.name,
@@ -772,6 +893,20 @@ export function computePushedSuggestion(candidates, options = {}) {
     .sort((a, b) => (b.score || 0) - (a.score || 0));
   for (const c of ranked) {
     let quantity = Math.max(1, Math.round(Number.isFinite(c.qty) && c.qty > 0 ? c.qty : 1));
+    // The same cap on how much of an item's hourly trading one order may be that the other two tiers
+    // apply (see volumeShareForDuration). A scanner-pushed pick carries the scanner's own quantity,
+    // sized from bankroll and the item's buy limit but not from what the item actually trades -- so
+    // until this was added, the tier that runs most often for anyone with the scanner open was the
+    // one tier with no guard against ordering more than the market absorbs, which is the failure
+    // mode behind every large loss the 90-day backtest found. A measured zero constrains to a single
+    // unit; genuinely absent volume data constrains nothing, exactly as in the other tiers.
+    let shareLimited = false;
+    const pushedShare = Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : volumeShareForDuration(options.targetDurationMinutes);
+    const pushedLiquidity = volumeReadingFor(options.volumes, c.itemId);
+    if (pushedLiquidity !== null && pushedShare > 0) {
+      const withinVolume = Math.max(1, Math.floor(pushedLiquidity * pushedShare));
+      if (withinVolume < quantity) { quantity = withinVolume; shareLimited = true; }
+    }
     // Same world/buy-limit gates every other tier applies, so a scanner-pushed pick can't bypass them.
     const gated = gateCandidate(c.itemId, quantity, options);
     if (!gated) continue;
@@ -788,7 +923,8 @@ export function computePushedSuggestion(candidates, options = {}) {
     const name = typeof c.name === 'string' && c.name ? c.name : `item ${c.itemId}`;
     const notes = [];
     if (cashLimited) notes.push('reduced to what your current cash stack can afford');
-    if (limitLimited) notes.push('reduced to what EVI has seen left of this item\'s 4-hour GE buy limit');
+    if (limitLimited) notes.push('reduced to what EVI has seen left of this item\'s GE buy limit over your trade window (it resets every 4 hours)');
+    if (shareLimited) notes.push(`reduced to ${Math.round(pushedShare * 100)}% of this item's recent hourly trading`);
     return {
       itemId: c.itemId,
       name,
@@ -1064,13 +1200,18 @@ export function forecastPolicyNote(policy) {
 // through to its own next fallback tier exactly as when nothing was eligible before either of these
 // existed.
 export async function pickWithForecast({rank, forecastFor, policy, horizon, cushionFor, requireCushion,
-  correlationFor, blocklist, maxAttempts = 3, onBlocked}) {
+  correlationFor, supportFor, blocklist, maxAttempts = 3, onBlocked, onDemoted}) {
   // What was held back and why, so the caller can say so rather than silently returning nothing --
   // "nothing passes your settings" would be wrong when a real candidate was set aside deliberately.
   const blocked = [];
+  // Picks whose margin disappears at what buyers actually paid (see sellPriceSupport), in rank order.
+  // DEMOTED rather than blocked: each is set aside so the next candidate gets a chance, and the best of
+  // them comes back only if nothing better passes -- carrying its warning. Warn-don't-block, applied to
+  // ranking: a stale pick loses its place in line, never its visibility.
+  const demoted = [];
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const candidate = rank(blocklist);
-    if (!candidate) return null;
+    if (!candidate) break;
     if (candidate.action !== 'buy') return candidate;
     if (forecastFor && horizon) {
       const forecast = await forecastFor(candidate.itemId);
@@ -1109,7 +1250,32 @@ export async function pickWithForecast({rank, forecastFor, policy, horizon, cush
         continue;
       }
     }
+    // Last, because it is the one check that costs a fetch. Reported live: EVI's top personal picks
+    // included a Mummy's head whose sell price was 58.6 hours old and a Tzhaar-ket-em at 12.7 hours,
+    // with nobody buying either in 12 hours. The warning alone flagged them but left them ranked first,
+    // since an outlier sell price inflates exactly the margin the ranking rewards.
+    if (supportFor) {
+      const support = await supportFor(candidate);
+      if (support && support.warning) {
+        candidate.reasoning = `${support.warning} ${candidate.reasoning || ''}`;
+        candidate.sellSupport = support.detail;
+        demoted.push(candidate);
+        // Reported for the log even when a better pick replaces it, so demotions can be reviewed
+        // later -- otherwise the check's calls would be invisible whenever it worked.
+        if (onDemoted) onDemoted(candidate);
+        blocklist.add(candidate.itemId);
+        continue;
+      }
+    }
     return candidate;
+  }
+  // Nothing passed every check. If a pick was only demoted, the best of those is still worth showing
+  // -- flagged, and saying why it is the one on screen.
+  if (demoted.length) {
+    const best = demoted[0];
+    best.demoted = true;
+    best.reasoning += ' No other candidate passed this check right now, which is why this one is shown.';
+    return best;
   }
   // Ran out of attempts. If everything that was tried got held back for a stated reason, say so --
   // a candidate deliberately set aside is a different answer from nothing being eligible.

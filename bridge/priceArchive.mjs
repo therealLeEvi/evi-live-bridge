@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import {userAgent} from './userAgent.mjs';
 
 // Optional background job: keeps a local archive of the OSRS Wiki's price averages for every item,
 // as the data a backtester and any future prediction model are measured against. The Wiki's own
@@ -44,7 +45,7 @@ export const STEPS = {
 };
 
 async function wikiFetch(url) {
-  const r = await fetch(url, {headers: {'User-Agent': 'EVI-Live/3.0 (personal local OSRS market scanner; hourly price archive)'},
+  const r = await fetch(url, {headers: {'User-Agent': userAgent('price archive')},
     signal: AbortSignal.timeout(20000), redirect: 'error'});
   if (!r.ok) throw new Error('Wiki returned HTTP ' + r.status);
   const text = await r.text();
@@ -72,7 +73,10 @@ export function readArchive(dir, fromTs = 0, toTs = Infinity, step = '1h') {
   if (!fs.existsSync(archiveDir)) return [];
   const byTs = new Map();
   const pattern = new RegExp('^' + step + '-\\d{4}-\\d{2}\\.jsonl\\.gz$');
-  for (const f of fs.readdirSync(archiveDir).filter(f => pattern.test(f)).sort()) {
+  // Each bucket is filed under its own month, so months wholly before fromTs cannot hold anything
+  // wanted -- skipping them keeps a read of the last few hours from decompressing months of history.
+  const firstMonth = fromTs > 0 && Number.isFinite(fromTs) ? monthOf(fromTs) : '';
+  for (const f of fs.readdirSync(archiveDir).filter(f => pattern.test(f) && f.slice(step.length + 1, step.length + 8) >= firstMonth).sort()) {
     const text = zlib.gunzipSync(fs.readFileSync(path.join(archiveDir, f))).toString('utf8');
     for (const line of text.split('\n')) {
       if (!line) continue;
@@ -83,7 +87,10 @@ export function readArchive(dir, fromTs = 0, toTs = Infinity, step = '1h') {
   return [...byTs.values()].sort((a, b) => a.ts - b.ts);
 }
 
-export function createPriceArchive({dir, fetchText = wikiFetch, now = () => Date.now(), log = () => {}, gapMs = GAP_MS} = {}) {
+// onStored(step, bucket) is called after each newly stored bucket -- the crash watch reads the
+// five-minute stream this way instead of fetching anything itself. A failure in it never affects
+// the archive.
+export function createPriceArchive({dir, fetchText = wikiFetch, now = () => Date.now(), log = () => {}, gapMs = GAP_MS, onStored = () => {}} = {}) {
   const archiveDir = path.join(dir, 'price-archive');
   const settingsFile = path.join(dir, 'settings.json');
   // fiveMinute is a nested block of its own rather than more top-level keys, so an existing
@@ -97,6 +104,25 @@ export function createPriceArchive({dir, fetchText = wikiFetch, now = () => Date
   // completely different rows, so they must never share a set.
   const stored = {'1h': new Set(), '5m': new Set()};
   let timer = null, running = false, lastFetchAt = null, lastError = null, busy = false;
+  // The last RECENT_HOURS hourly buckets, kept in memory for the live sell-support check, which runs on
+  // every suggestion and must not read files to do it. Filled from disk once, on first use, then kept
+  // current as each new hour is stored.
+  let recent = null;
+  const RECENT_HOURS = 26;
+  function keepRecent(bucket) {
+    recent.set(bucket.ts, bucket);
+    const cutoff = Math.floor(now() / 1000) - RECENT_HOURS * HOUR;
+    for (const ts of recent.keys()) if (ts < cutoff) recent.delete(ts);
+  }
+  // Hourly buckets from fromTs on, oldest first. Empty (never an error) when the archive is off or
+  // has nothing for those hours; the caller then relies on its own data exactly as before.
+  function recentHourly(fromTs) {
+    if (!recent) {
+      recent = new Map();
+      try { for (const b of readArchive(dir, Math.floor(now() / 1000) - RECENT_HOURS * HOUR)) keepRecent(b); } catch {}
+    }
+    return [...recent.values()].filter(b => b.ts >= fromTs).sort((a, b) => a.ts - b.ts);
+  }
 
   // Which settings block drives a given stream.
   const streamSettings = step => step === '1h'
@@ -167,6 +193,8 @@ export function createPriceArchive({dir, fetchText = wikiFetch, now = () => Date
         fs.appendFileSync(base + '.jsonl.gz', zlib.gzipSync(JSON.stringify(bucket) + '\n'));
         fs.appendFileSync(base + '.idx', bucket.ts + '\n');
         stored[stepName].add(bucket.ts);
+        if (stepName === '1h' && recent) keepRecent(bucket);
+        try { onStored(stepName, bucket); } catch (e) { log('Price archive listener: ' + e.message); }
       }
       if (!stored[stepName].has(ts)) { fs.mkdirSync(archiveDir, {recursive: true}); fs.appendFileSync(path.join(archiveDir, stepName + '-' + monthOf(ts) + '.idx'), ts + '\n'); stored[stepName].add(ts); }
       lastFetchAt = now(); lastError = null;
@@ -238,5 +266,5 @@ export function createPriceArchive({dir, fetchText = wikiFetch, now = () => Date
       steps: {'1h': hourly, '5m': fiveMinute}};
   }
   loadIndex();
-  return {start, stop, configure, status, step};
+  return {start, stop, configure, status, step, recentHourly};
 }

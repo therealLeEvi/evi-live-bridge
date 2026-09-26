@@ -46,8 +46,11 @@ runs the test suite (158 tests as of this writing).
 - Binds to `127.0.0.1` only, and rejects requests whose `Host` header is anything else.
 - Two separate keys: the browser dashboard uses a cookie-based session, the plugin a bearer key.
   Cross-site requests are refused.
-- The only upstream hosts contacted are `prices.runescape.wiki` and `secure.runescape.com`, both
-  public and both through a fixed allowlist of paths. There is no general-purpose proxy.
+- The only upstream hosts contacted are `prices.runescape.wiki`, `secure.runescape.com` and
+  `oldschool.runescape.wiki`, all public and all through a fixed allowlist of paths. There is no
+  general-purpose proxy. The last is only for item pictures: each is fetched once, kept in
+  `data/icons` and served from your own machine from then on, so the dashboard can show them
+  without loading anything from another host.
 - No account name, password, chat, or inventory content is collected. Accounts appear only as a
   salted pseudonym generated on your own machine. The plugin reads your coin count (to avoid
   suggesting trades you cannot afford) and, only if you switch that feature on, your inventory

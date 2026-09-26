@@ -54,6 +54,35 @@ test('loopback bridge protects personal scanner, API, origins, keys and static p
   const scoredBody=await scored.json();
   assert.equal(scoredBody.summary.shown,0,'a fresh bridge has nothing to score yet');
   assert.deepEqual(scoredBody.recent,[]);
+  // The sharing preview: scanner-gated, and says in its own body that nothing was sent.
+  assert.equal((await get('/api/share-preview')).status,401);
+  const preview=await (await get('/api/share-preview',{headers:{Cookie:cookie}})).json();
+  assert.equal(preview.sentAnywhere,false);assert.deepEqual(preview.records,[]);
+  // Crash alerts: scanner-gated; a fresh bridge with no five-minute archive says so rather than
+  // implying a calm market.
+  assert.equal((await get('/api/crash-alerts')).status,401);
+  const crashes=await (await get('/api/crash-alerts',{headers:{Cookie:cookie}})).json();
+  assert.equal(crashes.fiveMinuteOn,false);assert.equal(crashes.watching,false);assert.deepEqual(crashes.alerts,[]);
+  // Trading preferences: scanner-gated, default "any", and only "bulk" is accepted as the alternative.
+  assert.equal((await get('/api/preferences')).status,401);
+  assert.equal((await (await get('/api/preferences',{headers:{Cookie:cookie}})).json()).focus,'any');
+  const setPref=b=>get('/api/preferences',{method:'POST',headers:{...headers,Cookie:cookie,'X-EVI-UI':'1'},body:JSON.stringify(b)});
+  assert.equal((await (await setPref({focus:'bulk'})).json()).focus,'bulk');
+  assert.equal((await (await get('/api/preferences',{headers:{Cookie:cookie}})).json()).focus,'bulk','remembered');
+  assert.equal((await (await setPref({focus:'gear'})).json()).focus,'gear');
+  assert.equal((await (await setPref({focus:'anything else'})).json()).focus,'any','an unknown value falls back to no focus');
+  // Block: the plugin blocks with its key, the scanner lists and unblocks. Blocks survive a focus change.
+  assert.equal((await get('/api/suggestion/block',{method:'POST',headers,body:JSON.stringify({itemId:4151})})).status,401);
+  const block=b=>get('/api/suggestion/block',{method:'POST',headers:{...headers,Authorization:'Bearer '+app.secrets.plugin},body:JSON.stringify(b)});
+  assert.deepEqual((await (await block({itemId:4151})).json()).blocked,[4151]);
+  assert.equal((await block({itemId:'nonsense'})).status,400,'an invalid id is refused, never stored');
+  await setPref({focus:'bulk'});
+  assert.deepEqual((await (await get('/api/preferences',{headers:{Cookie:cookie}})).json()).blocked,[4151],'changing the focus keeps the blocks');
+  const unblock=await get('/api/preferences/block',{method:'POST',headers:{...headers,Cookie:cookie,'X-EVI-UI':'1'},body:JSON.stringify({itemId:4151,blocked:false})});
+  assert.deepEqual((await unblock.json()).blocked,[]);
+  // The API version: plugin key only, so a future plugin can tell an old bridge from a broken one.
+  assert.equal((await get('/api/version',{headers:{Authorization:'Bearer '+app.secrets.scanner}})).status,401);
+  assert.deepEqual(await (await get('/api/version',{headers:{Authorization:'Bearer '+app.secrets.plugin}})).json(),{api:1,packet:1});
   assert.equal((await get('/data/keys.json',{headers:{Cookie:cookie}})).status,404);
   assert.equal((await get('/api/market/anything?url=https://evil.example',{headers:{Cookie:cookie}})).status,404);
   // The browser scanner is optional: the bridge is published and usable on its own (the RuneLite

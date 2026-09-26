@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import {createSuggestionLog} from '../bridge/suggestionLog.mjs';
+import {createSuggestionLog,checksOf} from '../bridge/suggestionLog.mjs';
 import {createPriceArchive,readArchive,compactBucket} from '../bridge/priceArchive.mjs';
 
 function tempDir(t){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'evi-archive-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));return dir;}
@@ -21,6 +21,33 @@ test('suggestion log: records a suggestion once, repeats only after 30 minutes o
   assert.equal(log.record({account:'a',suggestion:null,now:T+5000}),false);
   const lines=fs.readFileSync(log.file,'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(lines.length,4);assert.equal(lines[0].itemId,2);assert.equal(lines[0].breakEvenPrice,null);
+  assert.deepEqual(lines[0].checks,{demoted:false,sellSupport:null,exitRisk:null},'a check that did not run is null, never a pass');
+});
+
+test('suggestion log: records what each safety check concluded, so its calls can be judged later',t=>{
+  const dir=tempDir(t),log=createSuggestionLog(dir);
+  const s={itemId:29049,name:'Eclipse Moon chestplate (broken)',action:'buy',source:'personal',quantity:1,buyPrice:595350,sellPrice:618004,
+    demoted:true,sellSupport:{supported:false,units:48,hours:12,averagePaid:587104.4,netAtAverage:-19988.2},
+    fillOutlook:{buy:0.912,sell:0.744,worst:'sell',notable:true,samples:15137}};
+  log.record({account:'a',suggestion:s,context:{risk:'low',heldBack:[{itemId:1,reason:'moves with X'}],buysHeldForExits:false}});
+  const e=JSON.parse(fs.readFileSync(log.file,'utf8').trim());
+  assert.equal(e.checks.demoted,true);
+  assert.deepEqual(e.checks.sellSupport,{supported:false,buyers:48,hours:12,averagePaid:587104,netAtAverage:-19988});
+  assert.deepEqual(e.checks.exitRisk,{buy:0.912,sell:0.744,worst:'sell',notable:true});
+  assert.equal(e.heldBack[0].reason,'moves with X','the correlation check\'s call is kept too');
+  assert.equal(e.risk,'low');
+  assert.equal(checksOf(null),null);
+});
+
+test('suggestion log: the same pick is logged again when a different item was demoted behind it',t=>{
+  const dir=tempDir(t),log=createSuggestionLog(dir),T=Date.UTC(2026,8,19);
+  const s={itemId:2,name:'Steel cannonball',action:'buy',source:'personal',quantity:100,buyPrice:243,sellPrice:249};
+  const demoted=id=>({demotedPicks:[{itemId:id,name:'x'}]});
+  assert.equal(log.record({account:'a',suggestion:s,now:T,context:demoted(7)}),true);
+  assert.equal(log.record({account:'a',suggestion:s,now:T+2000,context:demoted(7)}),false,'same call, same poll flood guard');
+  assert.equal(log.record({account:'a',suggestion:s,now:T+4000,context:demoted(8)}),true,'a different demotion is a different call');
+  const lines=fs.readFileSync(log.file,'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(lines.map(l=>l.demotedPicks[0].itemId),[7,8]);
 });
 
 function fakeWiki(calls){
@@ -152,4 +179,29 @@ test('price archive: a failed request records the error and stores nothing',asyn
   await assert.rejects(a.step(),/503/);
   assert.equal(a.status().lastError,'HTTP 503');assert.equal(a.status().hoursStored,0);
   assert.deepEqual(compactBucket({timestamp:1,data:{}}),{ts:1,d:{}});
+});
+
+test('price archive: recent hours are served from memory and kept current as new hours arrive',async t=>{
+  const dir=tempDir(t),calls=[];let clock=Date.UTC(2026,8,17,12,30);
+  const a=createPriceArchive({dir,fetchText:fakeWiki(calls),now:()=>clock});
+  a.configure({enabled:true,backfillDays:2});
+  while(await a.step()!==null);
+  const newest=Date.UTC(2026,8,17,11)/1000;
+  const got=a.recentHourly(newest-11*HOUR);
+  assert.equal(got.length,12);assert.equal(got.at(-1).ts,newest);
+  assert.ok(a.recentHourly(0).length<=27,'only about a day is kept in memory, never the whole archive');
+  clock+=HOUR*1000;await a.step();
+  assert.equal(a.recentHourly(newest).at(-1).ts,newest+HOUR,'a newly stored hour is visible without rereading disk');
+  const off=createPriceArchive({dir:tempDir(t),fetchText:fakeWiki([]),now:()=>clock});
+  assert.deepEqual(off.recentHourly(0),[],'no archive means an empty answer, not an error');
+});
+
+test('price archive: reading from a recent time skips earlier months but returns the same rows',t=>{
+  const dir=tempDir(t);fs.mkdirSync(path.join(dir,'price-archive'));
+  const put=(month,ts)=>fs.appendFileSync(path.join(dir,'price-archive',`1h-${month}.jsonl.gz`),zlib.gzipSync(JSON.stringify({ts,d:{}})+'\n'));
+  const aug=Date.UTC(2026,7,31,23)/1000,sep=Date.UTC(2026,8,1,0)/1000;
+  put('2026-08',aug);put('2026-09',sep);
+  assert.deepEqual(readArchive(dir,sep).map(b=>b.ts),[sep]);
+  assert.deepEqual(readArchive(dir,aug).map(b=>b.ts),[aug,sep],'a start inside a month still reads that month');
+  assert.deepEqual(readArchive(dir).map(b=>b.ts),[aug,sep]);
 });

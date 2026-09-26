@@ -302,7 +302,15 @@ export class Store {
         updated:p.ts,completedAt:old?.completedAt??(finished(o)?p.ts:null),
         // A linked continuation keeps the original record's coverage: the plugin can only ever say
         // "false" for an offer it first saw at login, even when EVI did watch it start earlier.
-        knownStart:aliased?old.knownStart:(old?.knownStart??o.knownStart)&&o.knownStart});
+        knownStart:aliased?old.knownStart:(old?.knownStart??o.knownStart)&&o.knownStart,
+        // When a buy first filled, kept the same way firstSeen and completedAt are kept above.
+        // The plugin reports -1 when it has no reading, and the final CANCELLED_BUY packet always
+        // does -- so taking the newest packet wholesale threw away a real count the moment an
+        // offer was cancelled. availableAt then fell back to when the offer FINISHED, which for a
+        // part-filled buy is after the player already sold what they bought, and the sale landed
+        // as unmatched. Real case, 27 Sept 2026: eight Dragon med helms bought out of an offer
+        // for 48, sold, and the rest cancelled 37 minutes later; see tests/partialBuyOrdering.
+        ticksToFill:Number.isInteger(o.ticksToFill)&&o.ticksToFill>=0?o.ticksToFill:old?.ticksToFill});
     }
     if(p.loggedIn&&p.offers.length===8)
       this.lastSlots.set(p.session,Array.from({length:8},(_,i)=>{const o=p.offers.find(x=>x.slot===i);return o&&o.state!=='EMPTY'?this.resolve(o.offerId):null;}));
@@ -348,7 +356,15 @@ export class Store {
         // A linked continuation is stored under its original offerId/coverage, so those two fields
         // legitimately differ from the packet; comparing them would journal every heartbeat.
         const ignore=this.alias.has(o.offerId)?['offerId','knownStart']:[];
-        return !rec||Object.keys(o).some(k=>!ignore.includes(k)&&o[k]!==rec[k]);
+        return !rec||Object.keys(o).some(k=>{
+          if(ignore.includes(k))return false;
+          // A packet that reports no fill time (-1, which every cancel does) is not disagreeing
+          // with the better value we kept from when the offer actually filled -- it simply has
+          // nothing to say. Treating that as a change would journal every heartbeat after a
+          // cancel, forever, on a two-second poll. A packet carrying a real reading still counts.
+          if(k==='ticksToFill'&&!(Number.isInteger(o[k])&&o[k]>=0))return false;
+          return o[k]!==rec[k];
+        });
       });
     if(changed)this.append({type:'packet',received:now,packet:p});
     const session=this.sessions.get(p.session); session.lastSeen=now;session.seq=p.seq;

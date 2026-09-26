@@ -7,10 +7,10 @@ you place yourself to this bridge, and asks it what to trade next.
 
 Nothing here is a service. There is no account, no sign-up, and no server anywhere else: the bridge
 listens on `127.0.0.1` only, stores its records in a folder next to itself, and the only outbound
-requests it makes are to two public sources — the [OSRS Wiki real-time price
-API](https://oldschool.runescape.wiki/w/RuneScape:Real-time_Prices) and the official Old School
-RuneScape news feed.
-
+requests it makes are to three public sources — the [OSRS Wiki real-time price
+API](https://oldschool.runescape.wiki/w/RuneScape:Real-time_Prices), the official Old School
+RuneScape news feed, and the OSRS Wiki's item images, each fetched once and then served from your
+own machine.
 ## Running it
 
 Requires Node.js 24 or newer.
@@ -28,7 +28,7 @@ history. It is never uploaded anywhere.
 npm test
 ```
 
-runs the test suite (158 tests as of this writing).
+runs the test suite (327 tests as of this writing).
 
 ## What it does
 

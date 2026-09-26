@@ -1242,7 +1242,14 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
       if(pathname.startsWith('/api/market/')) {
         const name=pathname.slice('/api/market/'.length);
         if(routes[name]){upstream='https://prices.runescape.wiki/api/v1/osrs/'+routes[name][0];ttl=routes[name][1];}
-        else if(name==='timeseries'&&/^\d{1,8}$/.test(url.searchParams.get('id')||'')&&['5m','1h','6h','24h'].includes(url.searchParams.get('timestep')))upstream='https://prices.runescape.wiki/api/v1/osrs/timeseries?'+new URLSearchParams({id:url.searchParams.get('id'),timestep:url.searchParams.get('timestep')});
+        else if(name==='timeseries'&&/^\d{1,8}$/.test(url.searchParams.get('id')||'')&&['5m','1h','6h','24h'].includes(url.searchParams.get('timestep'))) {
+          upstream='https://prices.runescape.wiki/api/v1/osrs/timeseries?'+new URLSearchParams({id:url.searchParams.get('id'),timestep:url.searchParams.get('timestep')});
+          // Set here on purpose rather than inherited from the default above. The scanner's
+          // prediction button leans on it: pressing it again inside this window costs the Wiki
+          // nothing, and that promise should not rest on what some other route's default happens
+          // to be. A price series moves slowly enough that five minutes is generous either way.
+          ttl=300000;
+        }
       }
       if(pathname==='/api/news'){upstream='https://secure.runescape.com/m=news/latest_news.rss?oldschool=true';ttl=900000;type='application/xml';}
       if(upstream) {

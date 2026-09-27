@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {parseDelimited, parseNumber, parseTime, suggestMapping, previewTable, FIELDS} from '../bridge/csvImport.mjs';
+import {parseDelimited, parseNumber, parseTime, suggestMapping, previewTable, itemResolver, FIELDS} from '../bridge/csvImport.mjs';
 import {Store} from '../bridge/store.mjs';
 import {createBridge} from '../bridge/server.mjs';
 
@@ -110,6 +110,81 @@ test('csv import: numbers and times survive the formats trackers actually use', 
   assert.equal(parseNumber('1.234.567', ','), 1234567, 'and reads correctly when told');
   assert.equal(parseTime('2026-09-13T11:31:27Z'), Date.parse('2026-09-13T11:31:27Z'));
   assert.equal(parseTime(''), null, 'a missing time is never guessed at');
+});
+
+test('csv import: a real export\'s own column names are recognised', () => {
+  // The headings from novi's actual tracker export, which is how this was found: it names its two
+  // quantity columns "Bought" and "Sold", so none of quantity/qty appeared and the whole file was
+  // refused. Only "Sold" is an alias, deliberately -- suggestMapping needs exactly one match, so
+  // accepting "Bought" too would make this very file ambiguous again.
+  const headers = ['First buy time', 'Last sell time', 'Account', 'Item', 'Status', 'Bought', 'Sold',
+    'Avg. buy price', 'Avg. sell price', 'Tax', 'Profit', 'Profit ea.'];
+  const m = suggestMapping(headers);
+  assert.equal(m.quantity, 6, 'the quantity is what was SOLD, since that is what completed');
+  assert.equal(headers[m.quantity], 'Sold');
+  assert.equal(m.item, 3);
+  assert.equal(m.buyPrice, 7);
+  assert.equal(m.profit, 10);
+  assert.equal(m.boughtAt, 0);
+  assert.equal(m.soldAt, 1);
+  for (const f of ['item', 'quantity', 'profit', 'boughtAt', 'soldAt'])
+    assert.notEqual(m[f], undefined, f + ' must map, or the page refuses the file');
+});
+
+test('csv import: a row still in progress is not finished, not broken', () => {
+  // A real export carries rows whose status is BUYING: nothing sold yet, no sell time, zero profit.
+  // Calling that an unreadable row would report someone's perfectly good file as broken.
+  const table = parseDelimited(['Item,Sold,Avg. buy price,Profit,First buy time,Last sell time',
+    'Echo crystal,0,2069619,0,2026-09-26T11:37:21Z,',
+    'Gold necklace,81,166,81,2026-09-26T10:57:49Z,2026-09-26T11:02:51Z'].join('\n'));
+  const {records, errors} = previewTable(table, suggestMapping(table[0]), {profitMeaning: 'after-tax', source: 'test'});
+  assert.equal(errors.length, 0, 'an unfinished row is not a file error');
+  assert.equal(records.length, 2);
+  const [pending, done] = records;
+  assert.equal(pending.quantity, null, 'zero sold means no quantity yet, not a quantity of zero');
+  assert.equal(pending.capital, null, 'and so nothing to derive a cost from');
+  assert.equal(pending.soldAt, null);
+  assert.equal(done.quantity, 81);
+  assert.equal(done.capital, 81 * 166);
+  assert.equal(done.profit, 81);
+  // A genuinely broken quantity is still an error, so this did not just loosen the check.
+  const bad = parseDelimited(['Item,Sold,Avg. buy price,Profit,First buy time,Last sell time',
+    'Coal,-5,100,50,2026-09-13T11:00:00Z,2026-09-13T12:00:00Z'].join('\n'));
+  const out = previewTable(bad, suggestMapping(bad[0]), {profitMeaning: 'after-tax', source: 'test'});
+  assert.equal(out.records.length, 0);
+  assert.match(out.errors[0].message, /negative|whole number/i);
+});
+
+test('itemResolver: a shortened name resolves only when it is unambiguous', () => {
+  // Trackers export "Varrock teleport" where the catalogue says "Varrock teleport (tablet)". Five of
+  // novi's 68 traded items went unresolved for that alone. But the restraint is the point: across the
+  // real catalogue, 190 of the 487 base names have more than one parenthetical variant, and picking
+  // the wrong one would teach EVI a history that never happened.
+  const resolve = itemResolver([
+    {id: 8007, name: 'Varrock teleport (tablet)'},
+    {id: 8449, name: 'Tall box hedge (bagged)'},
+    {id: 453, name: 'Coal'},
+    // Two variants of one base name: it must refuse to choose between them.
+    {id: 1111, name: 'Dragon platebody (g)'},
+    {id: 2222, name: 'Dragon platebody (t)'},
+    // A base name that is itself a real item, alongside a variant of it.
+    {id: 3333, name: 'Rune scimitar'},
+    {id: 4444, name: 'Rune scimitar (or)'},
+  ]);
+  assert.equal(resolve('Varrock teleport'), 8007, 'one candidate, so it resolves');
+  assert.equal(resolve('varrock TELEPORT'), 8007, 'and case does not matter');
+  assert.equal(resolve('Varrock teleport (tablet)'), 8007, 'the full name still works');
+  assert.equal(resolve('Tall box hedge'), 8449);
+  assert.equal(resolve('Coal'), 453);
+  assert.equal(resolve('Dragon platebody'), null, 'two variants: refuse rather than guess');
+  assert.equal(resolve('Rune scimitar'), 3333, 'an exact name always beats a suffix match');
+  assert.equal(resolve('Rune scimitar (or)'), 4444);
+  assert.equal(resolve('Nothing like this'), null);
+  assert.equal(resolve(''), null);
+  assert.equal(resolve(null), null);
+  // Rubbish in the catalogue is skipped rather than thrown over.
+  assert.equal(itemResolver([null, {name: 'x'}, {id: 'y', name: 'z'}, {id: 9, name: 'Real thing'}])('Real thing'), 9);
+  assert.equal(itemResolver(undefined)('anything'), null);
 });
 
 test('csv import: the parser\'s output is exactly what Store.importFlips accepts', t => {

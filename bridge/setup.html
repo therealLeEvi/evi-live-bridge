@@ -92,7 +92,8 @@ code{background:#e7ddc4;padding:1px 4px;border-radius:3px;font-size:13px}
   here, on this machine.</p>
 </section>
 </main>
-<script>
+<script type="module">
+const {parseDelimited, suggestMapping, previewTable, itemResolver} = await import('/csvImport.mjs');
 const $ = id => document.getElementById(id);
 const api = async (path, body) => {
   const opts = body === undefined ? {}
@@ -179,16 +180,14 @@ $('import').onclick = async () => {
 // This only drives it: read the file, resolve item names to ids, show what it found, then post.
 let csvReady = null;
 
+// Name to id, built once from the catalogue. itemResolver also handles the shortened names trackers
+// export ("Varrock teleport" for "Varrock teleport (tablet)"), and refuses to choose when a short name
+// has more than one variant.
 const itemIds = (() => {
-  let byName = null;
+  let resolve = null;
   return async () => {
-    if (byName) return byName;
-    const list = await api('/api/market/mapping');
-    byName = new Map();
-    for (const it of (Array.isArray(list) ? list : list.data || [])) {
-      if (it && it.name && Number.isFinite(it.id)) byName.set(String(it.name).trim().toLowerCase(), it.id);
-    }
-    return byName;
+    if (!resolve) resolve = itemResolver(await api('/api/market/mapping'));
+    return resolve;
   };
 })();
 
@@ -199,7 +198,6 @@ $('csvFile').onchange = async () => {
   if (!file) { say('csvStatus', ''); return; }
   say('csvStatus', 'Reading ' + file.name + '...');
   try {
-    const {parseDelimited, suggestMapping, previewTable, FIELDS} = await import('/csvImport.mjs');
     const text = await file.text();
     // Tab-separated files are common enough to be worth detecting rather than rejecting.
     const delimiter = file.name.toLowerCase().endsWith('.tsv') || (text.split('\n')[0] || '').includes('\t') ? '\t' : ',';
@@ -218,7 +216,7 @@ $('csvFile').onchange = async () => {
     const names = await itemIds();
     const flips = [], unknown = new Set(), incomplete = [];
     for (const r of records) {
-      const id = names.get(r.item.toLowerCase());
+      const id = names(r.item);
       if (!id) { unknown.add(r.item); continue; }
       // EVI's own importer requires all of these; a row without them is reported, never guessed at.
       if (!(r.quantity >= 1) || !(r.capital >= 0) || !(r.boughtAt >= 1) || !(r.soldAt >= 1)) { incomplete.push(r.row); continue; }

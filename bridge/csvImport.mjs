@@ -70,7 +70,45 @@ export function parseTime(value,format='iso',offsetMinutes=0) {
   return n;
 }
 
-const aliases={item:['item','item name','name'],profit:['profit','net profit','profit after tax'],capital:['capital','buy total','total cost'],quantity:['quantity','qty'],buyPrice:['avg. buy price','buy price'],netProceeds:['net proceeds','sale proceeds after tax'],boughtAt:['first buy time','buy time','bought at'],soldAt:['last sell time','sell time','sold at'],sourceId:['trade id','transaction id'],account:['account','character']};
+const aliases={item:['item','item name','name'],profit:['profit','net profit','profit after tax'],capital:['capital','buy total','total cost'],// 'sold' earns its place from a real export: the tracker novi uses names its two quantity columns
+// "Bought" and "Sold", so none of the obvious names appeared and the file was refused outright.
+// Only 'sold' is listed, deliberately -- suggestMapping accepts a field only when exactly ONE
+// heading matches it, so adding 'bought' as well would make a file carrying both ambiguous and
+// leave quantity unmapped again. Sold is also the right one of the two: a flip's quantity is what
+// actually completed, which is what the private importer settled on for the same file.
+quantity:['quantity','qty','sold','units','amount'],buyPrice:['avg. buy price','buy price'],netProceeds:['net proceeds','sale proceeds after tax'],boughtAt:['first buy time','buy time','bought at'],soldAt:['last sell time','sell time','sold at'],sourceId:['trade id','transaction id'],account:['account','character']};
+/**
+ * Turns the item catalogue into `name -> id`, tolerating the shortened names trackers export.
+ *
+ * Built from a real export: it lists "Varrock teleport", "Teleport to house" and "Tall box hedge",
+ * while the catalogue calls them "Varrock teleport (tablet)" and "Tall box hedge (bagged)". Five of
+ * novi's 68 traded items went unresolved for that reason alone, and silently.
+ *
+ * So an exact name wins, and failing that a name is accepted only when EXACTLY ONE catalogue entry is
+ * that name followed by a parenthesis. That restraint is the whole point rather than a nicety: of the
+ * 487 base names carrying a parenthetical variant, 190 have more than one, and attributing a trade to
+ * the wrong variant would teach EVI a history that never happened. Those 190 stay unresolved, and the
+ * caller reports them instead of guessing.
+ */
+export function itemResolver(list) {
+  const byName=new Map(),byBase=new Map();
+  for(const it of (Array.isArray(list)?list:list?.data||[])) {
+    if(!it||typeof it.name!=='string'||!Number.isFinite(it.id))continue;
+    const name=it.name.trim();if(!name)continue;
+    byName.set(name.toLowerCase(),it.id);
+    const base=name.match(/^(.*?) \(/)?.[1]?.trim().toLowerCase();
+    if(base)byBase.set(base,byBase.has(base)?null:it.id); // null means "more than one, so never guess"
+  }
+  return name=>{
+    const key=String(name??'').trim().toLowerCase();
+    if(!key)return null;
+    const exact=byName.get(key);
+    if(exact!==undefined)return exact;      // an exact name always beats a suffix match
+    const only=byBase.get(key);
+    return only===undefined||only===null?null:only;
+  };
+}
+
 export function suggestMapping(headers) {
   const result={};
   for(const [field,names] of Object.entries(aliases)) {
@@ -98,8 +136,15 @@ export function previewTable(table,mapping,options={}) {
       const num=f=>parseNumber(read(f),options.decimal||'.');
       const item=String(read('item')??'').trim();if(!item||item.length>200)throw Error('Missing or overly long item name.');
       if(['__proto__','constructor','prototype'].includes(item.toLowerCase()))throw Error('Invalid item name.');
-      const quantity=num('quantity'),price=num('buyPrice');let capital=num('capital'),profit=num('profit');
-      if(quantity!==null&&(!Number.isSafeInteger(quantity)||quantity<=0))throw Error('Quantity must be a positive whole number.');
+      // A quantity of exactly 0 is not a broken file, it is a trade that has not finished -- a real
+      // export carries rows still BUYING, with nothing sold yet and no sell time. Treating that as an
+      // error would report someone's perfectly good file as unreadable, so it becomes "no quantity
+      // yet" and falls out downstream: capital cannot be derived from it, and both the caller's own
+      // guard and Store.importFlips require a quantity of at least one.
+      let quantity=num('quantity');
+      if(quantity===0)quantity=null;
+      const price=num('buyPrice');let capital=num('capital'),profit=num('profit');
+      if(quantity!==null&&(!Number.isSafeInteger(quantity)||quantity<0))throw Error('Quantity must be a whole number and cannot be negative.');
       if(price!==null&&price<0)throw Error('Buy price cannot be negative.');
       if(capital===null&&quantity!==null&&price!==null)capital=quantity*price;
       if(capital!==null&&(!Number.isFinite(capital)||capital<0||capital>Number.MAX_SAFE_INTEGER))throw Error('Invalid total cost.');

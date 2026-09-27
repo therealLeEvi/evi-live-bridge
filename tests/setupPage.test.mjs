@@ -50,9 +50,11 @@ test('setup page: the archive can be switched on and off without the scanner', a
   const cookie = unlock.headers.get('set-cookie').split(';')[0];
   const ui = {...headers, Cookie: cookie, 'X-EVI-UI': '1'};
 
-  // Off is the shipped default, which is exactly why a way to turn it on had to exist.
+  // On is the shipped default since 27 Sept, because three checks read this archive and nothing
+  // published could switch it on. The page's job is now to let someone turn it OFF, and to say how
+  // much has been recorded.
   const before = await (await get('/api/price-archive', {headers: {Cookie: cookie}})).json();
-  assert.equal(before.enabled, false);
+  assert.equal(before.enabled, true);
   assert.equal(typeof before.hoursStored, 'number', 'the page reports this field, so it must exist');
 
   const on = await (await get('/api/price-archive', {method: 'POST', headers: ui,

@@ -94,8 +94,36 @@ export function createPriceArchive({dir, fetchText = wikiFetch, now = () => Date
   const archiveDir = path.join(dir, 'price-archive');
   const settingsFile = path.join(dir, 'settings.json');
   // fiveMinute is a nested block of its own rather than more top-level keys, so an existing
-  // settings.json written before it existed loads unchanged and stays off.
-  let settings = {enabled: false, backfillDays: 60, fiveMinute: {enabled: false, backfillDays: 7}};
+  // settings.json written before it existed loads unchanged.
+  //
+  // ON BY DEFAULT since 27 Sept 2026. It was off, and the only thing that could switch it on was a
+  // route behind the browser scanner's cookie -- and the scanner is in neither published repository.
+  // The consequence was that no Plugin Hub user had ever had an archive, so three of EVI's buy-side
+  // checks read an empty one and correctly, silently did nothing: thinMarket ("can this price even be
+  // bought again", which needs MIN_HOURS = 72 hours of it), the crash watch, and the correlation check.
+  // They were tested, documented, and disconnected in the only configuration anyone actually ran.
+  //
+  // Flipping the default is safe for anyone who deliberately switched it off, because `saved` is
+  // spread over these defaults below: a stored `enabled: false` still wins. And settings.json only ever
+  // gains a priceArchive block through configure(), so the new default reaches exactly the installs
+  // that never made a choice.
+  //
+  // The windows are sized for the checks and for the Wiki, not for research. Per-client politeness was
+  // already settled on 20 Sept: the rule of thumb other plugin authors use is about one request a
+  // second, this backfills one at a time GAP_MS apart (0.4 a second, deliberately under it), and the
+  // steady state is around 0.06 a second. None of that changes here. What does change is how many
+  // installs backfill at all, so the default windows are the smallest ones that do the job:
+  //
+  //   * 4 days of hourly -- 96 requests, about four minutes -- clears thinMarket's 72-hour bar in a
+  //     single pass with margin to spare. It reads a 14-day window and simply uses what is there.
+  //   * the five-minute stream tracks forward only, with no backfill. It exists for the crash watch,
+  //     which looks at the last 45 minutes, so history buys nothing: it goes live within minutes of
+  //     the bridge starting and costs one request every five minutes thereafter.
+  //
+  // That is ~96 requests once, against the ~624 a 14-day-plus-one-day default would have cost, then
+  // about 13 an hour forever. The private backtester wants far more and says so in its own stored
+  // settings, which override these.
+  let settings = {enabled: true, backfillDays: 4, fiveMinute: {enabled: true, backfillDays: 0}};
   try {
     const saved = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).priceArchive || {};
     settings = {...settings, ...saved, fiveMinute: {...settings.fiveMinute, ...(saved.fiveMinute || {})}};

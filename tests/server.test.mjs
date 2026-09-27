@@ -62,7 +62,10 @@ test('loopback bridge protects personal scanner, API, origins, keys and static p
   // implying a calm market.
   assert.equal((await get('/api/crash-alerts')).status,401);
   const crashes=await (await get('/api/crash-alerts',{headers:{Cookie:cookie}})).json();
-  assert.equal(crashes.fiveMinuteOn,false);assert.equal(crashes.watching,false);assert.deepEqual(crashes.alerts,[]);
+  // The five-minute stream is on by default since 27 Sept -- nothing else feeds the crash watch, and
+  // leaving it off meant no Plugin Hub user ever had crash alerts at all. But it is still not WATCHING
+  // until a bucket has actually arrived, and it must say so rather than imply a calm market.
+  assert.equal(crashes.fiveMinuteOn,true);assert.equal(crashes.watching,false);assert.deepEqual(crashes.alerts,[]);
   // Trading preferences: scanner-gated, default "any", and only "bulk" is accepted as the alternative.
   assert.equal((await get('/api/preferences')).status,401);
   assert.equal((await (await get('/api/preferences',{headers:{Cookie:cookie}})).json()).focus,'any');

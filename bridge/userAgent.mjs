@@ -15,7 +15,9 @@
 //
 // One place, because six files had hand-copied their own variant and one still said 3.6 while the
 // rest said 3.0 -- a version that drifts per file tells an API owner nothing useful.
-const VERSION = '3.7';
+// Bump this with the release line. It had drifted to 3.7 while the shipping plugin was 3.8.1 -- the
+// exact per-file drift this module was created to end, just slower.
+const VERSION = '3.8';
 const DISCORD = 'le.evi';
 const HOME = 'https://github.com/therealLeEvi/evi-live-bridge';
 

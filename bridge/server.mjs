@@ -47,6 +47,50 @@ const login=`<!doctype html><meta charset="utf-8"><title>EVI Live · Unlock</tit
 <form id="f"><label>Scanner key<input id="token" type="password" required autocomplete="off"></label><button>Unlock</button></form><p id="status"></p>
 <script>document.getElementById('f').onsubmit=async e=>{e.preventDefault();try{const r=await fetch('/api/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:document.getElementById('token').value.trim()})});if(!r.ok)throw Error('Key not accepted');location.replace('/')}catch(e){document.getElementById('status').textContent=e.message}};</script>`;
 
+// Which of EVI's per-request checks are live, and at what bar, for one GET /api/suggestion.
+//
+// Pulled out of the request handler and made pure on 27 Sept 2026 so it can be tested directly, after a
+// bug of exactly this shape reached a real user: the supported-margin check -- measure the minimum
+// against what buyers are really paying rather than the quoted spread -- was gated on the player having
+// SET a minimum, and MinProfitTier.AUTO is the shipped default and deliberately sends none. The check
+// existed, was tested, was documented, and did nothing for anybody on the factory settings. Nothing in
+// the suite could see it, because every test named its own parameters. See tests/defaultPolicy.test.mjs,
+// which asserts the defaults from this one function instead.
+//
+// AUTO_MIN_PROFIT: a player who has set no minimum has not thereby asked to be offered anything at all.
+// On 26 Sept EVI suggested 81 gold necklaces on a 53k stack: 324 gp of gross margin, of which the Grand
+// Exchange tax took 243, leaving 81 gp for a slot and the attention. Measured against the 74 real
+// suggestions ever made with no minimum set, whose median nets 28,208 gp, a 500 gp floor removes 8% of
+// them -- exactly that tail and nothing a player would miss. Deliberately a small flat figure rather
+// than a share of the cash stack: a share was measured too and would have dropped 71% of the same
+// suggestions, because it scales with capital while the absurdity does not.
+//
+// It is the one flat cutoff in EVI and it exists only where the player expressed no preference. Anyone
+// who genuinely wants those trades -- the thin-margin, high-volume flipping a small stack may depend on
+// -- sends minProfit=1, which is read as "no minimum at all" and switches off both the floor and the
+// margin-over-tax bar with it. See MinProfitTier.NONE in the plugin.
+export const AUTO_MIN_PROFIT=500;
+export function suggestionPolicy(searchParams) {
+  const askedFor=Math.max(0,Number(searchParams.get('minProfit'))||0);
+  const minProfitChosen=askedFor>0;
+  return {
+    askedFor,
+    minProfitChosen,
+    minProfit:minProfitChosen?askedFor:AUTO_MIN_PROFIT,
+    // An edge thinner than the item's own GE tax is not offered (see marginClearsTax in
+    // suggestions.mjs for the 335-hour measurement). Per-item rather than flat: the bar is that item's
+    // own tax, and a tax-free item is exempt by construction. On unless NONE asked for everything.
+    requireMarginOverTax:askedFor!==1,
+    // Starter profile (EviLiveConfig.tradingProfile): market-wide picks restricted to items the GE
+    // charges no tax on. See TradingProfile.java for the backtest behind it. Opt-in.
+    taxFreeOnly:searchParams.get('profile')==='starter',
+    // Opt-in, and correctly so: measured against live data this blocked every candidate (0 of 40
+    // market-wide, 0 of 5 personal) because its volatility estimate counts the ordinary bid-ask bounce
+    // -- the very margin being flipped -- as price movement. See EviLiveConfig.marginSafetyCushion.
+    requireCushion:searchParams.get('cushion')==='1',
+  };
+}
+
 export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
   fs.mkdirSync(dir,{recursive:true});
   const secretsFile=path.join(dir,'keys.json');
@@ -329,28 +373,10 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           const latest=JSON.parse(text).data||{};
           // Optional per-request tuning from the plugin's own config (min predicted profit, an item
           // blocklist, a risk tier); all default to the original unfiltered/medium behaviour.
-          // A player who has set no minimum has not asked to be offered anything at all. On
-          // 26 Sept EVI suggested 81 gold necklaces on a 53k stack: 324 gp of gross margin, of
-          // which the Grand Exchange tax took 243, leaving **81 gp** for a slot and the attention.
-          // Measured against the 74 real suggestions ever made with no minimum set, whose median
-          // nets 28,208 gp, a 500 gp floor removes 8% of them -- exactly that tail and nothing a
-          // player would miss. Deliberately a small flat figure rather than a share of the cash
-          // stack: a share was measured too and would have dropped 71% of the same suggestions,
-          // because it scales with capital while the absurdity does not.
-          //
-          // This is the one flat cutoff in EVI, and it exists only where the player expressed no
-          // preference. Anyone who genuinely wants those trades -- the thin-margin, high-volume
-          // flipping a small stack may depend on -- sends minProfit=1, which is honoured as
-          // "no minimum at all" and turns this off. See MinProfitTier.NONE in the plugin.
-          const AUTO_MIN_PROFIT=500;
-          const askedFor=Math.max(0,Number(url.searchParams.get('minProfit'))||0);
-          const minProfitChosen=askedFor>0;
-          const minProfit=minProfitChosen?askedFor:AUTO_MIN_PROFIT;
-          // An edge thinner than the item's own GE tax is not offered (see marginClearsTax in
-          // suggestions.mjs for the 335-hour measurement behind it). Per-item rather than flat: the
-          // bar is that item's own tax, and a tax-free item is exempt. MinProfitTier.NONE sends
-          // minProfit=1 meaning "no minimum at all", and switches this off with the floor.
-          const requireMarginOverTax=askedFor!==1;
+          // Which checks are live for this request, and at what bar. Read suggestionPolicy for why
+          // each default is what it is -- it is a pure function precisely so a test can assert that
+          // the plugin's DEFAULT query string leaves the important ones switched on.
+          const {minProfit,minProfitChosen,requireMarginOverTax}=suggestionPolicy(url.searchParams);
           const blocklist=new Set((url.searchParams.get('blocklist')||'').split(',').map(s=>parseInt(s,10)).filter(Number.isFinite));
           // Session-only exclusions from the plugin, not a config setting: items already occupying
           // an active/uncollected GE slot (so the same item isn't suggested again right after you've
@@ -456,8 +482,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           const maxStackShare=Number.isFinite(stackShareParam)&&stackShareParam>0&&stackShareParam<=100?stackShareParam/100:undefined;
           // Starter profile (EviLiveConfig.tradingProfile): market-wide picks restricted to items the
           // GE charges no tax on. See TradingProfile.java for the backtest behind it.
-          const taxFreeOnly=url.searchParams.get('profile')==='starter';
-          const requireCushion=url.searchParams.get('cushion')==='1';
+          const {taxFreeOnly,requireCushion}=suggestionPolicy(url.searchParams);
           async function cushionForSuggestion(candidate) {
             try {
               const url2=`https://prices.runescape.wiki/api/v1/osrs/timeseries?id=${candidate.itemId}&timestep=5m`;
@@ -1300,6 +1325,11 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
       // it over. See the 2026-09-27 README entry.
       const setupPage=()=>send(200,fs.readFileSync(path.join(root,'bridge','setup.html'),'utf8'),'text/html');
       if(pathname==='/setup')return setupPage();
+      // The CSV parser ships with the bridge (see csvImport.mjs) and is served to the browser, because
+      // both the setup page here and the scanner's own importer run it there rather than uploading a
+      // file. scanner/import-core.mjs re-exports this path, so the scanner keeps working unchanged.
+      if(pathname==='/csvImport.mjs')
+        return send(200,fs.readFileSync(path.join(root,'bridge','csvImport.mjs'),'utf8'),'text/javascript');
       if(files[pathname]) {
         // The browser scanner is optional: the bridge is useful on its own (the RuneLite plugin
         // talks to the API above). Fall back to the setup page rather than a bare 404 when the

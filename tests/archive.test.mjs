@@ -57,17 +57,38 @@ function fakeWiki(calls){
   };
 }
 
-test('price archive: off by default, fetches nothing until switched on',async t=>{
+test('price archive: on by default, but a stored choice to switch it off still wins',async t=>{
+  // It was off by default until 27 Sept 2026, and the only switch was behind the browser scanner's
+  // cookie -- which is in neither published repository, so no Plugin Hub user ever had an archive and
+  // the three checks that read one silently did nothing. See the comment on `settings` in
+  // priceArchive.mjs. The windows are asserted because they are sized for those checks, not research.
   const dir=tempDir(t),calls=[];
   const a=createPriceArchive({dir,fetchText:fakeWiki(calls),now:()=>Date.UTC(2026,8,17,12,30)});
-  assert.equal(a.status().enabled,false);
-  assert.equal(await a.step(),null);assert.equal(calls.length,0);
+  assert.equal(a.status().enabled,true);
+  // 4 days = 96 hourly requests, one every GAP_MS, which clears thinMarket's 72-hour bar in a single
+  // pass. The five-minute stream tracks forward with no backfill at all: the crash watch only looks at
+  // the last 45 minutes, so history would be requests spent on nothing.
+  assert.equal(a.status().backfillDays,4,'the smallest window that clears the 72-hour bar');
+  assert.equal(a.status().steps['5m'].enabled,true,'the crash watch reads this stream and nothing else feeds it');
+  assert.equal(a.status().steps['5m'].backfillDays,0,'forward only -- history buys the crash watch nothing');
+  assert.equal(typeof await a.step(),'number','it fetches without being asked twice');
+  assert.ok(calls.length>0);
+
+  // The half that matters for anyone who turned it off on purpose: a stored false is not overridden by
+  // the new default, because saved settings are spread over the defaults rather than under them.
+  const off=tempDir(t);
+  fs.writeFileSync(path.join(off,'settings.json'),JSON.stringify({priceArchive:{enabled:false,fiveMinute:{enabled:false}}}));
+  const b=createPriceArchive({dir:off,fetchText:fakeWiki([]),now:()=>Date.UTC(2026,8,17,12,30)});
+  assert.equal(b.status().enabled,false,'a deliberate off is never quietly flipped back on');
+  assert.equal(await b.step(),null);
 });
 
 test('price archive: newest complete hour first, then backfill, one request per step, nulls kept, survives restart',async t=>{
   const dir=tempDir(t),calls=[];let clock=Date.UTC(2026,8,17,12,30);
   const a=createPriceArchive({dir,fetchText:fakeWiki(calls),now:()=>clock});
-  a.configure({enabled:true,backfillDays:1});
+  // The five-minute stream is on by default now, and it would otherwise be served after the hourly
+  // one and inflate every count below. This test is about the hourly stream, so it says so.
+  a.configure({enabled:true,backfillDays:1,fiveMinute:{enabled:false}});
   const newest=Date.UTC(2026,8,17,11)/1000; // 12:30 -> the 11:00-12:00 hour is the newest complete one
   assert.equal(await a.step(),newest);assert.deepEqual(calls,[newest]);
   assert.equal(await a.step(),newest-HOUR);
@@ -96,15 +117,24 @@ function fakeWikiSteps(calls){
   };
 }
 
-test('price archive: five-minute data is a separate switch and never rides along with the hourly one',async t=>{
+test('price archive: five-minute data is a separate switch, independently controllable',async t=>{
+  // Both streams are on by default since 27 Sept, but they remain two switches rather than one: the
+  // five-minute stream can be turned off while the hourly one keeps running, which is what this asserts
+  // now that "on by default" has replaced the old "switching hourly on must not start 5m".
   const dir=tempDir(t),calls=[];
   const a=createPriceArchive({dir,fetchText:fakeWikiSteps(calls),now:()=>Date.UTC(2026,8,17,12,30)});
-  a.configure({enabled:true,backfillDays:0});
+  a.configure({enabled:true,backfillDays:0,fiveMinute:{enabled:false}});
   while(await a.step()!==null);
   assert.ok(calls.length>0,'the hourly stream still runs');
-  assert.equal(calls.filter(c=>c.step==='5m').length,0,'switching the hourly archive on must not start fetching 5m data');
+  assert.equal(calls.filter(c=>c.step==='5m').length,0,'the five-minute stream stays off when told to');
   assert.equal(a.status().steps['5m'].enabled,false);
   assert.equal(a.status().steps['5m'].stored,0);
+  // And back on again, without disturbing the hourly one.
+  a.configure({fiveMinute:{enabled:true,backfillDays:0}});
+  assert.equal(a.status().enabled,true,'the hourly stream is untouched by a five-minute change');
+  assert.equal(a.status().steps['5m'].enabled,true);
+  while(await a.step()!==null);
+  assert.ok(calls.filter(c=>c.step==='5m').length>0,'now it fetches');
 });
 
 test('price archive: the hourly stream is served before the five-minute one, each into its own files',async t=>{

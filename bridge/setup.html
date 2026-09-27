@@ -48,14 +48,34 @@ code{background:#e7ddc4;padding:1px 4px;border-radius:3px;font-size:13px}
 </section>
 
 <section>
+  <h2>Or bring a CSV from any tracker</h2>
+  <p>If you keep a log somewhere else, export it as CSV and hand it over. EVI reads the file here in
+  your browser, works out which column is which from its heading, and shows you what it found
+  <strong>before anything is saved</strong>.</p>
+  <p class="note">It needs, at minimum, an item name, a quantity, what you paid, the profit
+  <strong>after tax</strong>, and the buy and sell times. Names like <code>Item</code>,
+  <code>Quantity</code>, <code>Profit</code>, <code>Buy price</code>, <code>First buy time</code> and
+  <code>Last sell time</code> are all recognised. Nothing about the file leaves this computer.</p>
+  <div class="row">
+    <input type="file" id="csvFile" accept=".csv,.tsv,.txt,text/csv,text/plain">
+    <button id="csvImport" disabled>Import it</button>
+  </div>
+  <div class="status" id="csvStatus"></div>
+  <dl id="csvSummary" hidden></dl>
+  <p class="note" id="csvNote" hidden></p>
+</section>
+
+<section>
   <h2>Let EVI measure the market over time</h2>
   <p>EVI keeps its own record of prices as the hours pass, on this computer only. It uses it to answer
   two questions no single price can: <strong>can this price even be bought again</strong>, and
   <strong>is anyone actually paying it</strong>. Those two checks are how EVI avoids offering you a
   trade that cannot be finished.</p>
-  <p class="note">Without this, those checks have nothing to read and simply stay quiet. It fetches
-  public price data from the OSRS Wiki a few times an hour and writes it into your <code>data</code>
-  folder. It sends nothing about you.</p>
+  <p class="note"><strong>On by default</strong>, because without it those checks have nothing to read
+  and simply stay quiet. It fetches public price data from the OSRS Wiki about thirteen times an hour
+  and writes it into your <code>data</code> folder. It sends nothing about you, and you can switch it
+  off here. The first few minutes after a fresh start it collects four days of past hours, one request
+  every 2.5 seconds, and then settles down.</p>
   <div class="row">
     <button id="archiveOn">Switch it on</button>
     <button id="archiveOff">Switch it off</button>
@@ -93,17 +113,10 @@ const say = (id, text, cls) => { const e = $(id); e.textContent = text; e.classN
 // (never a path from the page), and needs the same list again to do the real write.
 let logFiles = [];
 
-const showSummary = p => {
-  const rows = [
-    ['Finished flips', num(p.flips)],
-    ['Different items', num(p.items)],
-    ['Net profit', num(p.profit) + ' gp'],
-    ['Won / lost', num(p.winners) + ' / ' + num(p.losers)],
-    ['Covers', day(p.firstTrade) + ' to ' + day(p.lastTrade)],
-    ['Still held', num(p.stillHeld)],
-    ['Sales with no purchase behind them', num(p.unmatchedSales)],
-  ];
-  const dl = $('summary');
+// Fills a <dl> from [label, value] pairs. Built with createElement rather than innerHTML because some
+// of these values are item names straight out of a file the player chose.
+const fillList = (id, rows) => {
+  const dl = $(id);
   dl.textContent = '';
   for (const row of rows) {
     const dt = document.createElement('dt'); dt.textContent = row[0];
@@ -112,6 +125,16 @@ const showSummary = p => {
   }
   dl.hidden = false;
 };
+
+const showSummary = p => fillList('summary', [
+  ['Finished flips', num(p.flips)],
+  ['Different items', num(p.items)],
+  ['Net profit', num(p.profit) + ' gp'],
+  ['Won / lost', num(p.winners) + ' / ' + num(p.losers)],
+  ['Covers', day(p.firstTrade) + ' to ' + day(p.lastTrade)],
+  ['Still held', num(p.stillHeld)],
+  ['Sales with no purchase behind them', num(p.unmatchedSales)],
+]);
 
 $('scan').onclick = async () => {
   $('scan').disabled = true; say('logStatus', 'Looking...');
@@ -149,6 +172,101 @@ $('import').onclick = async () => {
       + '. EVI will use them for ranking from the next suggestion on.', 'ok');
     $('importNote').hidden = true;
   } catch (e) { say('logStatus', e.message, 'bad'); $('import').disabled = false; }
+};
+
+// ---- CSV from any tracker ----
+// The parsing, column guessing and validating all live in the bridge's own csvImport.mjs, served here.
+// This only drives it: read the file, resolve item names to ids, show what it found, then post.
+let csvReady = null;
+
+const itemIds = (() => {
+  let byName = null;
+  return async () => {
+    if (byName) return byName;
+    const list = await api('/api/market/mapping');
+    byName = new Map();
+    for (const it of (Array.isArray(list) ? list : list.data || [])) {
+      if (it && it.name && Number.isFinite(it.id)) byName.set(String(it.name).trim().toLowerCase(), it.id);
+    }
+    return byName;
+  };
+})();
+
+$('csvFile').onchange = async () => {
+  const file = $('csvFile').files[0];
+  csvReady = null; $('csvImport').disabled = true;
+  $('csvSummary').hidden = true; $('csvNote').hidden = true;
+  if (!file) { say('csvStatus', ''); return; }
+  say('csvStatus', 'Reading ' + file.name + '...');
+  try {
+    const {parseDelimited, suggestMapping, previewTable, FIELDS} = await import('/csvImport.mjs');
+    const text = await file.text();
+    // Tab-separated files are common enough to be worth detecting rather than rejecting.
+    const delimiter = file.name.toLowerCase().endsWith('.tsv') || (text.split('\n')[0] || '').includes('\t') ? '\t' : ',';
+    const table = parseDelimited(text, delimiter);
+    const mapping = suggestMapping(table[0] || []);
+    const missing = ['item', 'quantity', 'profit', 'boughtAt', 'soldAt'].filter(f => mapping[f] === undefined);
+    if (mapping.capital === undefined && mapping.buyPrice === undefined) missing.push('capital or buyPrice');
+    if (missing.length) {
+      say('csvStatus', 'Could not tell which column is which. Missing: ' + missing.join(', ')
+        + '. The headings found were: ' + (table[0] || []).join(', '), 'bad');
+      return;
+    }
+    // A source name, so the whole import can be undone later as one group.
+    const source = ('csv ' + file.name).slice(0, 40);
+    const {records, errors} = previewTable(table, mapping, {profitMeaning: 'after-tax', source});
+    const names = await itemIds();
+    const flips = [], unknown = new Set(), incomplete = [];
+    for (const r of records) {
+      const id = names.get(r.item.toLowerCase());
+      if (!id) { unknown.add(r.item); continue; }
+      // EVI's own importer requires all of these; a row without them is reported, never guessed at.
+      if (!(r.quantity >= 1) || !(r.capital >= 0) || !(r.boughtAt >= 1) || !(r.soldAt >= 1)) { incomplete.push(r.row); continue; }
+      flips.push({fp: r.fp, itemId: id, item: r.item, quantity: Math.round(r.quantity),
+        capital: Math.round(r.capital), profit: Math.round(r.profit),
+        firstBuy: r.boughtAt, lastSell: r.soldAt, account: r.account || undefined});
+    }
+    const profit = flips.reduce((n, f) => n + f.profit, 0);
+    const times = flips.flatMap(f => [f.firstBuy, f.lastSell]);
+    fillList('csvSummary', [
+      ['Rows in the file', num(table.length - 1)],
+      ['Ready to import', num(flips.length)],
+      ['Net profit', num(profit) + ' gp'],
+      ['Won / lost', num(flips.filter(f => f.profit > 0).length) + ' / ' + num(flips.filter(f => f.profit < 0).length)],
+      ['Covers', times.length ? day(Math.min(...times)) + ' to ' + day(Math.max(...times)) : '-'],
+      ['Rows EVI could not read', num(errors.length)],
+      ['Item names it did not recognise', num(unknown.size)],
+      ['Rows missing a time, quantity or cost', num(incomplete.length)],
+    ]);
+    const aside = [];
+    if (unknown.size) aside.push('Unrecognised items: ' + [...unknown].slice(0, 6).join(', ') + (unknown.size > 6 ? ', and more' : '') + '.');
+    if (errors.length) aside.push('First problem: row ' + errors[0].row + ' - ' + errors[0].message);
+    aside.push('Nothing has been saved yet. Imports are grouped under "' + source + '" so the whole lot can be removed again.');
+    $('csvNote').textContent = aside.join(' ');
+    $('csvNote').hidden = false;
+    if (!flips.length) { say('csvStatus', 'No usable trades in this file.', 'warn'); return; }
+    csvReady = {source, flips};
+    $('csvImport').disabled = false;
+    say('csvStatus', flips.length + ' trades read from ' + file.name + '.', 'ok');
+  } catch (e) { say('csvStatus', e.message, 'bad'); }
+};
+
+$('csvImport').onclick = async () => {
+  if (!csvReady) return;
+  $('csvImport').disabled = true;
+  try {
+    // The route takes 500 at a time and refuses a fingerprint it has already seen.
+    let added = 0, dupes = 0;
+    for (let i = 0; i < csvReady.flips.length; i += 500) {
+      say('csvStatus', 'Importing ' + Math.min(i + 500, csvReady.flips.length) + ' of ' + csvReady.flips.length + '...');
+      const r = await api('/api/flips/import', {source: csvReady.source, flips: csvReady.flips.slice(i, i + 500)});
+      added += (r && r.accepted) || 0; dupes += (r && r.duplicates) || 0;
+    }
+    say('csvStatus', 'Imported ' + added + ' trades'
+      + (dupes ? ', and skipped ' + dupes + ' EVI had already seen' : '')
+      + '. They count towards ranking from the next suggestion on.', 'ok');
+    $('csvNote').hidden = true;
+  } catch (e) { say('csvStatus', e.message, 'bad'); $('csvImport').disabled = false; }
 };
 
 // ---- price archive ----

@@ -92,8 +92,14 @@ code{background:#e7ddc4;padding:1px 4px;border-radius:3px;font-size:13px}
   here, on this machine.</p>
 </section>
 </main>
-<script type="module">
-const {parseDelimited, suggestMapping, previewTable, itemResolver} = await import('/csvImport.mjs');
+<script>
+// A classic script, and the parser is loaded on demand inside the one handler that needs it.
+//
+// It was briefly a module with a top-level `await import('/csvImport.mjs')`, and that made the whole
+// page fragile in a way worth not repeating: against a bridge still running older code the route 404s,
+// the import throws, and because nothing below it ever runs, EVERY button on the page silently does
+// nothing -- the history import and the archive switches included. The page looked perfectly fine and
+// was inert. Loading it where it is used means a stale bridge breaks only the CSV section, and says so.
 const $ = id => document.getElementById(id);
 const api = async (path, body) => {
   const opts = body === undefined ? {}
@@ -180,13 +186,27 @@ $('import').onclick = async () => {
 // This only drives it: read the file, resolve item names to ids, show what it found, then post.
 let csvReady = null;
 
+// The parser, fetched once and only when a file is chosen. A bridge running code older than the route
+// answers 404, and that has to read as "restart it", not as a dead page.
+let parserPromise = null;
+const loadParser = () => {
+  if (!parserPromise) parserPromise = import('/csvImport.mjs').catch(() => {
+    parserPromise = null;   // so choosing a file again retries after a restart
+    throw new Error('This bridge cannot serve the CSV reader yet. Close its window, start it again, and reload this page.');
+  });
+  return parserPromise;
+};
+
 // Name to id, built once from the catalogue. itemResolver also handles the shortened names trackers
 // export ("Varrock teleport" for "Varrock teleport (tablet)"), and refuses to choose when a short name
 // has more than one variant.
 const itemIds = (() => {
   let resolve = null;
   return async () => {
-    if (!resolve) resolve = itemResolver(await api('/api/market/mapping'));
+    if (!resolve) {
+      const {itemResolver} = await loadParser();
+      resolve = itemResolver(await api('/api/market/mapping'));
+    }
     return resolve;
   };
 })();
@@ -198,6 +218,7 @@ $('csvFile').onchange = async () => {
   if (!file) { say('csvStatus', ''); return; }
   say('csvStatus', 'Reading ' + file.name + '...');
   try {
+    const {parseDelimited, suggestMapping, previewTable} = await loadParser();
     const text = await file.text();
     // Tab-separated files are common enough to be worth detecting rather than rejecting.
     const delimiter = file.name.toLowerCase().endsWith('.tsv') || (text.split('\n')[0] || '').includes('\t') ? '\t' : ',';

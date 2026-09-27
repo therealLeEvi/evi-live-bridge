@@ -11,6 +11,7 @@ requests it makes are to three public sources — the [OSRS Wiki real-time price
 API](https://oldschool.runescape.wiki/w/RuneScape:Real-time_Prices), the official Old School
 RuneScape news feed, and the OSRS Wiki's item images, each fetched once and then served from your
 own machine.
+
 ## Running it
 
 Requires Node.js 24 or newer.
@@ -20,15 +21,23 @@ npm start
 ```
 
 On first run it creates a `data/` folder holding two random keys and an append-only journal of the
-offers it has been told about. The console prints a **RuneLite plugin key**; paste that into the
-plugin's sidebar to pair them. Keep the `data/` folder private: it holds your keys and your trade
-history. It is never uploaded anywhere.
+offers it has been told about. The console prints both keys:
+
+- the **RuneLite plugin key** — paste it into the plugin's sidebar to pair them;
+- the **Scanner key** — paste it at `http://127.0.0.1:51743/` to open the browser dashboard.
+
+`http://127.0.0.1:51743/setup` imports the trade history you already have, from the Exchange Logger
+plugin or a CSV exported by any tracker, and turns EVI's local price record on or off. Both are
+optional: EVI suggests trades without either.
+
+Keep the `data/` folder private: it holds your keys and your trade history. It is never uploaded
+anywhere.
 
 ```
 npm test
 ```
 
-runs the test suite (327 tests as of this writing).
+runs the test suite (380 tests as of this writing).
 
 ## What it does
 
@@ -37,6 +46,11 @@ runs the test suite (327 tests as of this writing).
 - **Suggests what to trade next**, ranked from your own reviewed trade history first, and optionally
   from the whole item catalogue when your history has nothing eligible. Every suggestion is sized
   against your actual cash, the item's 4-hour buy limit, and how long you want a trade to take.
+- **Refuses trades whose edge is thinner than their own tax.** A margin the Grand Exchange's tax would
+  eat is not offered, judged both on the quoted spread and on what buyers have actually been paying
+  over the last 12 hours. The bar is the item's own tax, so it scales with the price, and tax-free
+  items are exempt — measured over 335 hours of prices, that band is the safest of all. Choosing "no
+  minimum at all" switches it off, for anyone who deliberately wants thin, high-volume flips.
 - **Warns instead of hiding.** A sale that would lose money is still shown, with the loss and the
   break-even price, so the decision stays yours. When a check lacks data, it says so rather than
   inventing a number.
@@ -55,15 +69,22 @@ runs the test suite (327 tests as of this writing).
   salted pseudonym generated on your own machine. The plugin reads your coin count (to avoid
   suggesting trades you cannot afford) and, only if you switch that feature on, your inventory
   contents so idle stock can be suggested for sale.
-- The optional price archive (off by default) saves the Wiki's public hourly price averages locally
-  for backtesting, one request at a time.
+- **The local price record is on by default.** It saves the Wiki's public hourly and five-minute price
+  averages into `data/price-archive`, one request at a time, 2.5 seconds apart. Three of EVI's own
+  safety checks read it and can say nothing without it: whether a price can realistically be bought
+  again, whether an item is crashing, and whether a candidate duplicates something you already hold.
+  On a fresh start it collects four days of past hours — about 96 requests over four minutes — then
+  settles to roughly 13 an hour. It sends nothing about you, and you can switch it off at `/setup`.
 
 `LOCAL-API.md` documents every endpoint the bridge exposes.
 
 ## Scope
 
-This repository is the bridge alone. The browser dashboard that reviews trades and shows profit over
-time is not published here.
+This repository holds the bridge and the browser dashboard it serves. The dashboard is one HTML page
+plus a few scripts in `scanner/`; the bridge serves them at `http://127.0.0.1:51743/` once unlocked.
+
+Not published here: the backtester and the measurement tools used to decide what EVI's checks should
+do. They read the same local journal and archive, and none of them are needed to run any of this.
 
 ## Licence
 

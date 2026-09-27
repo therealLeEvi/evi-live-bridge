@@ -1,0 +1,1526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EVI Flip Scanner V3 — OSRS</title>
+<style>
+/* Old School flavour, chosen by the player: parchment and worn leather rather than the original
+   navy. Every colour below is a variable and the page uses nothing else, so a future scheme is one
+   edit here -- the few hard-coded shades that had crept into table headers, the notice box and the
+   primary button are now variables too. Profit green, loss red and warning amber stay distinct
+   against the brown so the numbers that matter are never decoration. */
+:root{
+  --bg:#2b241a;--panel:#3a3124;--panel2:#473c2c;--text:#e8dcc0;--muted:#b6a888;
+  --line:#5a4a33;--accent:#ffb000;--good:#8fd18a;--warn:#ffcf5c;--bad:#ff6b5e;--violet:#d3a6ff;
+  --head:#453a29;--hover:#4a3f2d;--primary:#6b4f22;--primary-line:#ffb000;--score75:#b9d47a;--fast:#9ed0dd;
+}
+/* The alternative: the palette EVI's own plugin panel uses inside RuneLite -- the client's dark greys
+   with EVI's teal as the only accent -- so the scanner and the sidebar read as one tool. Switched in
+   the tab bar; the page uses nothing but these variables, so the two schemes stay in step. */
+:root[data-theme="runelite"]{
+  --bg:#1e1e1e;--panel:#262626;--panel2:#2e2e2e;--text:#c8c8c8;--muted:#8c8c8c;
+  --line:#3b3b3b;--accent:#53cdb4;--good:#5fd38d;--warn:#ff981f;--bad:#ff7474;--violet:#b997ff;
+  --head:#232323;--hover:#303030;--primary:#1d4d44;--primary-line:#53cdb4;--score75:#9edc73;--fast:#78dfff;
+}
+:root[data-theme="runelite"] header{background:rgba(30,30,30,.96)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+header{position:sticky;top:0;z-index:5;background:rgba(43,36,26,.96);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.wrap{max-width:1550px;margin:auto;padding:14px 18px}
+h1{font-size:22px;margin:0}.sub{color:var(--muted);font-size:12px;margin-top:3px}
+.grid{display:grid;grid-template-columns:repeat(6,minmax(130px,1fr));gap:10px;margin:14px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px}
+.card b{font-size:18px;display:block}.card span{color:var(--muted);font-size:12px}
+.controls{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-bottom:18px}
+.controls label{position:relative}
+label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:12px}
+input,select,button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+input[type=number]{width:120px}.search{width:220px}
+/* The two amount fields take text now ("380m"), so they need their own width, and the line that
+   echoes what EVI read is always present -- reserved here rather than appearing as you type, which
+   made the whole controls row jump. */
+#bankroll,#maxPos{width:150px}
+.controls .gpecho{position:absolute;top:100%;left:0;line-height:15px;font-size:11px;white-space:nowrap;pointer-events:none}
+button{cursor:pointer;font-weight:700}button:hover{border-color:var(--accent)}
+.primary{background:var(--primary);border-color:var(--primary-line)}.ghost{background:transparent}
+.status{padding:8px 10px;border-radius:8px;background:var(--panel);border:1px solid var(--line);color:var(--muted)}
+.tabs{display:flex;gap:8px;margin:12px 0}.tab.active{border-color:var(--accent);color:white}
+.tablewrap{overflow:auto;border:1px solid var(--line);border-radius:12px}
+table{border-collapse:collapse;width:100%;min-width:1450px;background:var(--panel)}
+th,td{padding:9px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th{position:sticky;top:0;background:var(--head);z-index:3;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+th:nth-child(2),td:nth-child(2){text-align:left;position:sticky;left:0;background:var(--panel);z-index:2}
+th:nth-child(2){background:var(--head);z-index:4}
+/* The scanner leads with the score, so there the score is pinned too and the item column sits beside
+   it rather than underneath it. Only this table: elsewhere column one is the account name, which has
+   no business being a fixed 56px. */
+#scannerTable th:nth-child(1),#scannerTable td:nth-child(1){position:sticky;left:0;width:56px;min-width:56px;background:var(--panel);z-index:2}
+#scannerTable th:nth-child(2),#scannerTable td:nth-child(2){left:56px;box-shadow:1px 0 0 var(--line)}
+#scannerTable th:nth-child(1){background:var(--head);z-index:4}
+#scannerTable tbody tr:hover td:nth-child(1),#scannerTable tbody tr:hover td:nth-child(2){background:var(--panel2)}
+tbody tr:hover{background:var(--hover)}
+.score{font-size:16px;font-weight:800}.s90{color:var(--good)}.s75{color:var(--score75)}.s60{color:var(--warn)}.slow{color:var(--bad)}
+.good{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}.pred{display:inline-block;padding:3px 7px;border-radius:999px;font-weight:800;font-size:11px;border:1px solid var(--line)}.pred.up{color:var(--good)}.pred.down{color:var(--bad)}.pred.flat{color:var(--warn)}.pred.rebound{color:var(--violet)}
+.tag{display:inline-block;padding:2px 7px;border-radius:999px;border:1px solid var(--line);font-size:11px}
+.fast{color:var(--fast)}.medium{color:var(--good)}.overnight{color:var(--violet)}
+.detail{font-size:12px;color:var(--muted)}
+/* One item, opened. The chart's two lines keep their own tokens in both themes: validated for
+   colour-blind separation against each theme's panel, unlike the green/amber the tables use. */
+:root{--chart-buy:#c07f15;--chart-sell:#5295d6}
+.itemcell{display:flex;align-items:center;gap:8px;text-align:left}
+.itemcell img{width:28px;height:28px;object-fit:contain;flex:none;image-rendering:-webkit-optimize-contrast}
+#scannerTable tbody tr{cursor:pointer}
+#scannerTable tbody tr.sel{outline:2px solid var(--accent);outline-offset:-2px}
+#itemDrawer{position:fixed;top:0;right:0;width:min(420px,100vw);height:100vh;z-index:20;overflow:auto;
+  background:var(--panel);border-left:1px solid var(--line);padding:14px;box-shadow:-8px 0 24px rgba(0,0,0,.35)}
+#itemDrawer[hidden]{display:none}
+#itemDrawer h3{margin:14px 0 6px;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+#itemDrawer .head{display:flex;align-items:center;gap:10px}
+#itemDrawer .head img{width:40px;height:40px;object-fit:contain}
+#itemDrawer .head h2{margin:0;font-size:18px}
+.kv{display:grid;grid-template-columns:1fr auto;gap:4px 10px;font-size:13px}
+.kv .k{color:var(--muted)}.kv .v{text-align:right;font-variant-numeric:tabular-nums}
+.kv .strong{font-weight:700}
+#itemDrawer .btn{display:inline-block;background:var(--panel2);color:var(--text);border:1px solid var(--line);
+  border-radius:8px;padding:8px 10px;text-decoration:none}
+.chartwrap{position:relative;margin-top:6px}
+.chartwrap svg{display:block;width:100%;height:auto}
+.charttip{position:absolute;pointer-events:none;background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;padding:6px 8px;font-size:12px;white-space:nowrap;transform:translate(-50%,-115%);display:none}
+.legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.feedback button{padding:3px 6px;font-size:11px;font-weight:600}
+.notice{margin:12px 0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;color:var(--text)}
+.portfolio{display:grid;grid-template-columns:1fr 1fr;gap:12px}.portfolio table{min-width:700px}
+@media(max-width:1000px){.grid{grid-template-columns:repeat(2,1fr)}.portfolio{grid-template-columns:1fr}}
+details{margin:12px 0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px}
+summary{cursor:pointer;font-weight:700}.footer{color:var(--muted);font-size:12px;margin:18px 0}
+
+/* V2.2: easy horizontal scrolling */
+.tablewrap, .table-wrap, .table-container, .overflow {
+  overflow-x:auto !important;
+  overflow-y:visible;
+  cursor:grab;
+  touch-action:pan-x pan-y;
+  scrollbar-gutter:stable;
+}
+.tablewrap.dragging, .table-wrap.dragging, .table-container.dragging, .overflow.dragging {
+  cursor:grabbing;
+  user-select:none;
+}
+table { min-width:max-content; }
+
+
+.newsflag{display:inline-block;padding:3px 7px;border-radius:999px;font-size:11px;font-weight:800;border:1px solid var(--line)}
+.newsflag.hot{color:var(--bad)}
+.newsflag.watch{color:var(--warn)}
+.newsflag.info{color:var(--good)}
+.newslink{color:inherit;text-decoration:underline;text-underline-offset:2px}
+
+
+/* Long lists scroll inside their own box, header pinned, so the rest of the page stays one short
+   scroll away. Every row is still there. The "whole list on the page" toggle removes the box. */
+.tablewrap.scrollbox{max-height:70vh;overflow-y:auto !important}
+body.fulllists .tablewrap.scrollbox{max-height:none;overflow-y:visible !important}
+#scannerTable td{padding:5px 8px}
+.listbar{display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:6px 0}
+.listbar label{flex-direction:row;align-items:center;gap:6px}
+.tab .badge{margin-left:6px;color:var(--bad)}
+.tabs .fullListsInTabs{margin-left:auto;flex-direction:row;align-items:center;gap:6px}
+.tabs{flex-wrap:wrap} #liveView select{max-width:100%;width:390px} #liveView label{max-width:100%} #liveView input[type=number]{width:240px}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>EVI Flip Scanner <span class="tag">V3 · Live RuneLite</span></h1>
+    <div class="sub">Personal OSRS GE scanner — live market + your own trade history</div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="controls">
+    <label>Bankroll (GP)<input id="bankroll" type="text" inputmode="decimal" value="150000000" autocomplete="off" placeholder="380m, 1.5b, 750k…"><small class="gpecho detail"></small></label>
+    <label>Max / position<input id="maxPos" type="text" inputmode="decimal" value="15000000" autocomplete="off" placeholder="15m"><small class="gpecho detail"></small></label>
+    <label>GE slots<input id="slots" type="number" value="8" min="0" max="8"></label>
+    <label>Suggest by<select id="portfolioSort"><option value="score">Best EVI score</option><option value="profit">Highest expected profit</option><option value="capital">Lowest capital needed</option><option value="qty">Lowest quantity to buy</option></select></label>
+    <label>Minimum score<input id="minScore" type="number" value="55" min="0" max="100"></label>
+    <label>Focus<select id="focusPick" title="Applies to this list and to EVI's suggestions in game. Split by each item's own GE buy limit: bulk goods sell by the thousand, gear in single or double figures."><option value="any">All items</option><option value="gear">Gear</option><option value="bulk">Bulk: consumables &amp; ammo</option></select></label><label>Item access<select id="itemAccess"><option value="all">All items</option><option value="free">Free-to-play</option><option value="members">Members</option></select></label><label>Mode<select id="mode"><option value="all">All</option><option>Fast</option><option>Medium</option><option>Overnight</option></select></label>
+    <label>Search<input id="search" class="search" placeholder="rune arrow, voidwaker…"></label>
+    <button id="refresh" class="primary">Refresh market</button>
+    <button id="portfolioBtn">Suggest My GE Slots</button>
+    <button id="predictBtn">Load predictions for visible flips</button>
+    <button id="newsBtn">Refresh OSRS news</button>
+    <label>Import mode<select id="importMode"><option value="merge">Add to history</option><option value="replace">Replace history</option></select></label>
+    <label>Import trade history (CSV)<input id="csv" type="file" accept=".csv,text/csv"></label>
+  </div>
+
+  <div class="grid">
+    <div class="card"><b id="marketCount">—</b><span>market candidates</span></div>
+    <div class="card"><b id="bestScore">—</b><span>best EVI score</span></div>
+    <div class="card"><b id="bestProfit">—</b><span>best expected profit</span></div>
+    <div class="card"><b id="histCount">—</b><span>items in your history</span></div>
+    <div class="card"><b id="histTrades">—</b><span>historical completed flips</span></div>
+    <div class="card"><b id="updated">—</b><span>last market refresh</span></div>
+  </div>
+
+  <div id="status" class="status">Loading live Grand Exchange market data…</div>
+
+  <div class="tabs">
+    <button class="tab active" data-view="scanner">Scanner</button>
+    <button class="tab" data-view="portfolio">Suggested GE Slots</button>
+    <button class="tab" data-view="history">My history</button>
+    <button class="tab" data-view="news">Market News</button><button class="tab" data-view="live">Live RuneLite</button><button class="tab" data-view="lookup">Item lookup</button>
+    <label class="detail fullListsInTabs">Colours<select id="themePick"><option value="osrs">Old School</option><option value="runelite">RuneLite / EVI</option></select></label>
+    <label class="detail fullListsInTabs" style="margin-left:0"><input type="checkbox" class="fullListsToggle"> Show whole lists on the page</label>
+  </div>
+
+  <section id="scannerView">
+    <div class="notice">
+      <b>How to use:</b> higher score = better fit for your <span id="helpBankroll">150M GP</span> bankroll. EVI can load historical time-series for the visible shortlist and calculate separate 1h, 6h and overnight forecasts. Predictions are loaded only when you press the button, never on a timer: one press fetches three price series for each of the 30 visible candidates, spread over about ten seconds, and pressing again within five minutes is served from this computer's own cache rather than the Wiki.  “Buy” is the latest low trade and “Sell” the latest high trade, not a guaranteed fill.
+      For expensive items, test the price with a small order first. The “crowding” value is a market-behaviour proxy, not a count of how many players are flipping the item.
+    </div>
+    <aside id="itemDrawer" hidden aria-label="Item detail"></aside>
+    <div class="listbar"><span id="scannerCount" class="detail"></span><label class="detail"><input type="checkbox" class="fullListsToggle"> Show whole lists on the page</label></div>
+    <div class="tablewrap scrollbox">
+      <table id="scannerTable">
+        <thead><tr>
+          <th>Score</th><th>Item</th><th>Mode</th><th>News</th><th>Prediction</th><th>1h</th><th>6h</th><th>Overnight</th><th>Buy</th><th>Sell</th><th>Net ea.</th><th>ROI</th>
+          <th>5m vol.</th><th>1h vol.</th><th>Limit</th><th>Qty</th><th>Capital</th><th>Expected</th>
+          <th>Your record</th><th>Hold</th><th>Crowding</th><th>Fill feedback</th>
+        </tr></thead><tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="portfolioView" style="display:none">
+    <div class="notice"><b>Suggested GE Slots:</b> this creates a shortlist for the GE slots you want to fill right now. Choose whether EVI should prioritize the best overall score, highest expected profit, lowest capital needed, or lowest quantity to buy. It strictly respects your bankroll, GE-slot count, max-position setting, and minimum score; an item is excluded if even one unit is unaffordable. Keep some cash free instead of forcing all 150M into the market.</div>
+    <div class="tablewrap scrollbox">
+      <table id="portfolioTable">
+        <thead><tr><th>#</th><th>Item</th><th>Score</th><th>Mode</th><th>Buy</th><th>Sell</th><th>Qty</th><th>Capital</th><th>Expected</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="portfolioSummary" class="notice">Click “Suggest My GE Slots”.</div>
+  </section>
+
+  <section id="historyView" style="display:none">
+    <div class="notice">Your history starts with the trades you have imported. Import another trade-history CSV with “Add to history” to merge extra flips into the local profile. The scanner also stores fingerprints of imported rows to avoid counting the same flip twice. Use “Replace history” only if you intentionally want a fresh dataset.</div>
+    <div class="tablewrap scrollbox">
+      <table id="historyTable">
+        <thead><tr><th>Trades</th><th>Item</th><th>Total profit</th><th>Win rate</th><th>Median profit</th><th>Median ROI</th><th>Median hold</th><th>Avg capital</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="newsView" style="display:none">
+    <div class="notice">
+      <b>Official OSRS market news:</b> EVI checks the official Jagex Old School RuneScape RSS feed and looks for item names
+      and market-sensitive keywords in recent announcements. A catalyst flag means “review this trade”, not guaranteed up/down movement.
+      The deeper ChatGPT news monitor remains useful for interpreting broader knock-on effects that simple browser matching can miss.
+    </div>
+    <div id="newsStatus" class="status">News has not been refreshed yet.</div>
+    <div class="tablewrap scrollbox">
+      <table id="newsTable">
+        <thead><tr><th>Date</th><th>Official announcement</th><th>Type</th><th>Market signal</th><th>Matched scanner items</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="liveView" style="display:none">
+    <div class="notice"><b>Passive observation only.</b> You place every offer yourself. Start the bridge and plugin before trading. Offers already present at login are marked as a baseline, not new trades. No cash balance is collected; bankroll and free GE slots remain manual inputs.</div>
+    <div id="liveStatus" class="status" role="status">Connecting to local bridge…</div>
+    <div class="controls" style="margin:12px 0"><button id="liveRefresh">Refresh live data</button><button id="downloadTradeLog">Download trade log (CSV)</button><button id="exportEvi">Back up EVI browser data</button><label>Restore EVI backup<input type="file" id="restoreEvi" accept=".json"></label><button id="evaluateEvi">Evaluate due predictions</button></div>
+    <div id="liveProfitSummary" class="notice" style="font-size:1.3em;font-weight:bold" role="status"></div>
+    <p id="liveDataHealth" class="detail" role="status"></p>
+    <h2>What you own</h2>
+    <p class="detail">Everything EVI can see, valued at what it would fetch today: your coin count as last reported by the plugin, the coins the Grand Exchange is holding for buy offers still filling (the GE takes them when you place the offer), and your stock -- listed or held -- at what buyers are paying now, after tax. Stock EVI has no current price for is carried at what you paid and counted separately, so a missing price never looks like a loss. History is recorded from the plugin's own polls, at most once every fifteen minutes, so the line fills in as you play. Nothing here is sent anywhere.</p>
+    <p id="wealthSummary" class="detail" role="status">Wealth view unavailable.</p>
+    <div id="wealthChart"></div>
+    <p id="wealthParts" class="detail"></p>
+    <div class="controls" style="margin-top:10px"><label>Goal<input id="goalItem" type="text" list="goalItems" placeholder="Twisted bow, or a GP amount like 1.2b" autocomplete="off" style="width:260px"></label><label>How many<input id="goalQty" type="number" value="1" min="1" style="width:90px"></label><button id="goalSave">Set goal</button><button id="goalClear" class="ghost">Clear</button></div>
+    <datalist id="goalItems"></datalist>
+    <p id="goalStatus" class="detail" role="status">No goal set.</p>
+    <div id="goalBar" style="display:none;height:10px;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--panel2)"><div id="goalFill" style="height:100%;width:0;background:var(--accent)"></div></div>
+    <p id="goalDetail" class="detail"></p>
+    <h2>Crashes right now</h2>
+    <p class="detail">Items whose price is collapsing, found from the five-minute price archive: buyers and sellers both paying far below the item's own 24-hour average, on far more volume than it normally trades. Your own running offers and holdings are marked, and those alerts also appear in the RuneLite sidebar. Each one quotes how often crashes like it came back in the last 90 days. <strong>That is history, not a forecast:</strong> EVI does not know why a price crashed, and a crash can be a permanent change.</p>
+    <p id="crashStatus" class="detail" role="status">Crash watch status unavailable.</p>
+    <div class="controls"><button id="crashNotify" type="button">Notify me on this computer</button><label><input type="checkbox" id="crashNotifyAll"> Also for items I don't hold</label></div>
+    <div class="tablewrap scrollbox"><table><thead><tr><th>Since</th><th>Item</th><th>Buyers paying now</th><th>24h average before</th><th>Traded (30 min)</th><th>Status</th></tr></thead><tbody id="crashRows"></tbody></table></div>
+    <details><summary>Full alert text</summary><div id="crashMessages" class="detail"></div></details>
+    <h2>Active GE offers</h2><div class="tablewrap scrollbox"><table><thead><tr><th>Account</th><th>Item</th><th>Slot</th><th>Status</th><th>Offer GP each</th><th>Filled / total</th><th>Avg price each so far</th><th>Market now: buy / sell</th><th>Reported GP total</th><th>Coverage</th></tr></thead><tbody id="liveOffers"></tbody></table></div>
+    <h2>Completed buys and sells</h2><p class="detail">Includes cancelled offers with fills. Reported GP is the raw GE counter (before tax for sales). Price each is that counter divided by the filled quantity — the real average you paid or received. Market now is the OSRS Wiki's latest instant-sell (low, roughly what buying costs) and instant-buy (high, roughly what selling gets) price, refreshed with the Scanner tab every minute — not a guaranteed fill. An offer marked "First seen at login" was placed while EVI wasn't watching; its counters are still the full totals.</p>
+    <div class="tablewrap scrollbox"><table><thead><tr><th>Account</th><th>Item</th><th>Status</th><th>Filled</th><th>Price each</th><th>Market now: buy / sell</th><th>Reported GP</th><th>Observed completion</th><th>Coverage</th></tr></thead><tbody id="liveCompleted"></tbody></table></div>
+    <h2>Automatically matched trades</h2><p class="detail">Every fully observed buy is matched to its sale(s) automatically as soon as they're seen — including a sale that got split across several separate GE offers (cancel and reprice, or re-listing a remainder), which used to get stuck waiting for manual review below. Nothing here needs a click; it already counts in the profit total above and in the downloadable log.</p>
+    <p id="liveAutoStatus" class="detail" role="status"></p>
+    <div class="tablewrap scrollbox"><table><thead><tr><th>Account</th><th>Item</th><th>Qty</th><th>Cost</th><th>Net proceeds</th><th>Profit</th><th>Observed hold</th><th>Sales combined</th><th>Confidence</th></tr></thead><tbody id="liveAutoFlips"></tbody></table></div>
+    <h2>Blocked items</h2>
+    <p class="detail">Items you blocked with the sidebar's "Block this item" button. EVI never suggests buying these; if you already hold some, it still reminds you to sell them, so nothing you own goes quiet.</p>
+    <p id="blockedStatus" class="detail" role="status"></p>
+    <div id="blockedList"></div>
+    <h2>Yours, not stock</h2>
+    <p class="detail">Items you own and use rather than flip. EVI never suggests selling these, and gear it only sees in your inventory is the case the "Personal use" button in the sidebar covers. Marking one here or in game has the same effect, and it never stops EVI suggesting you BUY that item to flip.</p>
+    <p id="ownedStatus" class="detail" role="status"></p>
+    <div id="ownedList"></div>
+    <h2 id="stillHeld">Still held</h2><p class="detail">Purchases EVI hasn't seen fully sold yet. These are what the RuneLite plugin reminds you to sell. If the rest is gone — used in-game, or sold while EVI wasn't running — close it here so it stops being suggested. Whatever part EVI did see sold still counts as profit; the rest is left out. You can undo this below.</p>
+    <div class="tablewrap scrollbox"><table><thead><tr><th>Account</th><th>Item</th><th>Unsold / bought</th><th>Paid each</th><th>Market now: buy / sell</th><th>Bought</th><th>Actions</th></tr></thead><tbody id="liveOpenPositions"></tbody></table></div><details><summary>Closed positions (undo)</summary><div id="liveClosedPositions"></div></details>
+    <h2>Review a completed flip</h2><p>Optional — automatic matching above already counts every fully observed trade. Use this only to override the automatically calculated proceeds (e.g. mixed execution prices), or to merge a trade into EVI's learning history for future suggestions. Choose a fully observed buy and its later sales. After cancelling and repricing, select the cancelled sale with fills and the replacement sale (hold Ctrl to select several). Filled quantities must total the original purchase. Leave proceeds blank to calculate tax automatically for exact observed sales. Mixed execution prices or missing coverage require review.</p>
+    <div class="controls"><label>Buy<select id="liveBuy" size="5"></select></label><label>Matching sales (Ctrl-click for several)<select id="liveSell" multiple size="5"></select></label><label>Net proceeds override (optional GP)<input id="liveNet" type="text" inputmode="decimal" autocomplete="off" placeholder="blank = automatic, or e.g. 1.500.000 / 1.5m"><small id="liveNetPreview" class="detail"></small></label><button id="confirmFlip">Save reviewed flip</button><button id="mergeFlips">Merge reviewed flips into EVI history</button></div>
+    <p id="liveMatchHint" role="status"></p><p id="liveAction" role="status"></p>
+    <div class="tablewrap scrollbox"><table><thead><tr><th>Account</th><th>Item</th><th>Qty</th><th>Cost</th><th>Net proceeds</th><th>Profit</th><th>Observed hold</th><th>Prediction at entry</th><th>History</th><th>Actions</th></tr></thead><tbody id="liveFlips"></tbody></table></div><details><summary>Removed flips (restore)</summary><div id="liveRemoved"></div></details>
+    <div class="notice">Reviewed flips are merged once per EVI record ID. Imported CSV rows use different identifiers: avoid importing periods that overlap live flips already merged here. Great / Slow / Bad feedback stays manual. Realized profit is not a test of fixed-horizon price-direction accuracy.</div>
+    <h2>How you've been trading</h2>
+    <p class="detail">Your own settings history, taken from the suggestions EVI logged, with what happened under each. A new row starts whenever you change the minimum profit, the trade duration or the risk level. <strong>These are periods, not experiments:</strong> the market differs from week to week, so a period that looks better may simply have been a better week, and a handful of closed trades says nothing either way. Rows with too little to go on are marked. Requests EVI made to itself during development are left out.</p>
+    <p id="periodStatus" class="detail" role="status">No settings history yet.</p>
+    <div class="tablewrap scrollbox"><table><thead><tr><th>From</th><th>To</th><th>Min profit</th><th>Duration</th><th>Risk</th><th>Shown</th><th>Acted on</th><th>Filled</th><th>Closed</th><th>Realised</th><th>Checks fired</th></tr></thead><tbody id="periodRows"></tbody></table></div>
+    <h2>How EVI is doing</h2><p class="detail">EVI scoring itself: every suggestion it showed you, checked against what actually happened in your Grand Exchange. "Acted on" is inferred from timing — an offer for that item appearing within two hours of the suggestion — so something you were going to trade anyway counts as following EVI. Only trades EVI both suggested and then saw complete are counted as closed.</p>
+    <p id="outcomeSummary" class="detail" role="status">No suggestions scored yet.</p>
+    <div class="tablewrap scrollbox"><table><thead><tr><th>Shown</th><th>Item</th><th>Suggested</th><th>You placed</th><th>Outcome</th></tr></thead><tbody id="outcomeRows"></tbody></table></div>
+    <details id="sharePreview"><summary>What would be shared (nothing is)</summary><p class="detail">EVI shares nothing today. If a way to pool fill data with other players is ever built, it will be off unless you switch it on, and this is exactly what it would contain: per offer, the item, buy or sell, the day (never the time), the price as a percentage above or below that hour&#039;s market, the size as a band of that hour&#039;s volume, and how it turned out. No account, no exact prices or quantities, no profit. Offers EVI cannot describe without guessing are left out and counted below.</p><p id="sharePreviewStatus" class="detail" role="status">Open this to build the preview.</p><pre id="sharePreviewBody" class="detail" style="max-height:24em;overflow:auto;white-space:pre-wrap"></pre></details>    <h2>Price history archive (for backtesting)</h2><p class="detail">Optional. Saves the OSRS Wiki's hourly average prices and volumes for every item on this computer, so future prediction and safety checks can be tested against what really happened before they're trusted with real trades. Light by design: one Wiki request at a time — a couple of seconds apart while catching up on past days, then one per hour — and about 22 MB of disk per month. Off by default. Nothing is sent anywhere except those public Wiki price requests.</p>
+    <h2>What this week's news touches</h2>
+    <p class="detail">Tradeable items connected to each recent Old School news post, found by following the game's own mechanics through the OSRS Wiki rather than by matching item names in the article — an update to an Agility course reaches amylase crystals through marks of grace, without ever naming them. Each row shows the chain, so you can judge it and dismiss the ones that do not hold up. <strong>This is a connection, not a prediction:</strong> EVI has no view on whether an update moves a price, or which way. Walked in the background at most twice a day and cached; it never delays anything else.</p>
+    <p id="newsItemsStatus" class="detail" role="status">News links unavailable.</p>
+    <div id="newsItems"></div>
+
+    <div class="controls"><label><input type="checkbox" id="archiveEnabled"> Archive hourly prices</label><label>Catch up on past days<select id="archiveBackfill"><option value="0">None</option><option value="7">7 days</option><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days (maximum)</option></select></label></div>
+    <p id="archiveStatus" class="detail" role="status">Archive status unavailable.</p>
+    <div class="controls"><label><input type="checkbox" id="archiveFiveEnabled"> Also archive five-minute prices</label><label>Catch up on past days<select id="archiveFiveBackfill"><option value="0">None</option><option value="7">7 days</option><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days (maximum)</option></select></label></div>
+    <p id="archiveFiveStatus" class="detail" role="status">Five-minute archive status unavailable.</p>
+    <p class="detail">Five-minute buckets cost about 95 MB a month against roughly 22 MB for hourly, and a full 90-day catch-up is around 26,000 requests spread over many hours at one request every 2.5 seconds. What they buy is timing: an hourly bucket cannot tell whether an offer filled in its first five minutes or its last fifty, which is what fill-time estimates and relist timing depend on. The hourly archive is always fetched first, so switching this on never slows it down.</p>    <h2>Prediction evaluation</h2><p id="evaluationStatus" role="status">Evaluate due predictions to compare logged market midpoints with later market midpoints. Overnight is defined as 12 hours. Model confidence remains a strength score, not an accuracy percentage.</p>
+  </section>
+  <section id="lookupView" style="display:none">
+  <h2>All GE items</h2><p>Search the Wiki price catalogue, independently of bankroll and flip filters. Catalogue coverage does not imply a trading recommendation.</p>
+  <label>Item name or ID <input id="lookupQuery" type="search" placeholder="Try Avernic or an item ID"></label>
+  <label>Item access<select id="lookupAccess"><option value="all">All items</option><option value="free">Free-to-play</option><option value="members">Members</option></select></label><button id="lookupRefresh">Refresh prices</button><p id="lookupStatus" role="status"></p>
+  <div class="tablewrap scrollbox"><table><thead><tr><th>Item</th><th>Latest high / instant buy</th><th>Reported at</th><th>Latest low / instant sell</th><th>Reported at</th><th>Buy limit</th><th>Source</th></tr></thead><tbody id="lookupResults"></tbody></table></div>
+  <p>Prices are reported trades, not guaranteed quotes or net proceeds after tax. Older reports may be stale. Missing prices remain unknown. Only items listed by the Wiki price API appear here.</p>
+  </section><details>
+    <summary>How EVI Score V2 works, and what it is measured to be worth</summary>
+    <p class="detail">
+      Six components, rescaled to total 100: about <b>29 points current net opportunity after tax</b>, 24 liquidity,
+      18 your personal history, 12 holding-time fit, 12 market stability and price freshness, 6 market-quality / crowding proxy.
+      When a prediction has been loaded, the horizon matching the flip mode adjusts the score by up to ±6.
+      Your history is shrunk toward a neutral prior so one lucky flip does not dominate a repeated winner, and an item you have
+      never traded scores half of its 18 rather than zero — an unfamiliar item is not punished for being unfamiliar.
+      Your own feedback moves it too: <b>Great +2, Slow −3, Bad −7</b>. A trade expected to be extremely slow loses 10.
+      A negative after-tax margin is excluded outright.
+    </p>
+    <p class="detail">
+      <b>What changed on 26 September 2026, and why.</b> V1 had a seventh component worth 15 points for a large
+      <i>expected absolute profit</i>. It was measured and removed. It rewarded size, which on any given day means a big
+      position in something illiquid, and it double-counted the minimum-profit setting you already control — turning a filter
+      you can see into a bias you could not. Measured over 60 days of archived prices against the same alternatives, removing
+      it improved every figure that matters:
+    </p>
+    <p class="detail">
+      With it (V1) the median pick made <b>4,991 gp</b>, won 53% of the time, left 55% of trades unsold, had a worst trade of
+      <b>−493,749</b>, and took <b>55% of all its profit from a single trade</b>. Without it (V2, what you are using) the median
+      pick makes <b>14,085 gp</b>, wins <b>71%</b>, leaves 31% unsold, has a worst trade of <b>−72,486</b>, and its best single
+      trade is <b>9%</b> of the total — the profit is spread across many items instead of resting on one. Over 24-hour holds it
+      wins <b>80%</b> with 3% concentration. At a large cash stack the worst trade fell from <b>−4,111,256 to −72,486</b>.
+    </p>
+    <p class="detail">
+      <b>Picking at random is not the alternative, whatever its win rate suggests.</b> Random wins about four times in five —
+      on a median trade of a few hundred gp. Give it a real cash stack and count only trades expecting 500k or more and it
+      loses <b>18 to 22 million</b>. A win rate is worthless without the size of the win beside it.
+    </p>
+    <p class="detail">
+      <b>The score is still only the scanner's opinion, not the decision.</b> A pick sent to the bridge is checked again there
+      against things this score knows nothing about: the buy-limit windows, the volume cap for your trade duration, whether
+      buyers have actually been paying your sell price, the item's own fill history, crash alerts and the correlation check.
+      Any of those can demote or drop whatever is ranked first here. And the measurement above is one 60-day window with a
+      fill model generous to every strategy equally, so <b>treat the score as a shortlist, not a verdict</b> and read the
+      item's own numbers before committing. Rerun it yourself: <code>node tools/score-v1-check.mjs</code>.
+    </p>
+  </details>
+
+  <div class="footer">
+    Market source: RuneScape Wiki real-time price API / RuneLite data. GE tax model: 2% per item, rounded down, capped at 5,000,000 GP per item.
+    This is a decision-support scanner, not an automation/bot; you place all offers yourself in-game. “Suggest My GE Slots” can rank by EVI score, expected profit, capital required, or quantity required.
+  </div>
+</main>
+
+<script>
+const DEFAULT_HISTORY = {}; // Empty on purpose -- see the note below.
+// This held 638 item profiles and 1,209 trades belonging to the person who built EVI: per-item profit,
+// win rates, median hold times and average capital committed, including single items carrying over 113m
+// gp. Publishing the scanner with that in it would publish their whole trading record, permanently and
+// copyable by anyone, so it was exported to the private data/ folder and emptied here on 27 Sept 2026.
+//
+// Empty is also the right default. A new player SHOULD start with no history: the market-wide tier is
+// built for exactly that case, and /setup imports an Exchange Logger log or a CSV from any tracker when
+// they have one. Anything loaded from localStorage under 'eviHistory' still takes precedence over this.
+let history = loadJSON('eviHistory', DEFAULT_HISTORY);
+let feedback = loadJSON('eviFeedback', {});
+let rows = [];
+let market = null;
+
+const API = {
+  mapping:'/api/market/mapping',
+  latest:'/api/market/latest',
+  m5:'/api/market/5m',
+  h1:'/api/market/1h',
+  // One item's recent history, the player's own offers on it, and EVI's two readings (bridge/server.mjs).
+  itemDetail:'/api/item-detail',
+  // The item's picture, cached on this machine by the bridge (see bridge/icons.mjs).
+  icon:'/api/icon'
+};
+
+function loadJSON(k, fallback){ try{ const x=localStorage.getItem(k); return x?JSON.parse(x):fallback; }catch(e){ return fallback; } }
+function saveJSON(k,v){ try{localStorage.setItem(k,JSON.stringify(v));}catch(e){} }
+const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
+const gp=n=>{
+  if(!Number.isFinite(n)) return '—';
+  const s=Math.abs(n), sign=n<0?'-':'';
+  if(s>=1e9)return sign+(s/1e9).toFixed(2)+'b';
+  if(s>=1e6)return sign+(s/1e6).toFixed(2)+'m';
+  if(s>=1e3)return sign+(s/1e3).toFixed(1)+'k';
+  return sign+Math.round(s).toLocaleString();
+};
+const gpExact=n=>Number.isFinite(n)?Math.round(n).toLocaleString('en-US'):'—';
+// Parses a GP amount typed by hand: "1500000", "1,500,000", "1.500.000", "1 500 000", "1.5m",
+// "1,5m", "750k", "2b". Without a k/m/b suffix, separators are only accepted as thousands grouping
+// (so "1.5" is rejected rather than silently read as 1 or 15); with a suffix, one separator is a
+// decimal point either way. Returns {value} (a positive whole number) or {error}, never a guess.
+function parseGpAmount(text){
+  const s=String(text??'').trim().toLowerCase().replace(/\s*gp$/,'');
+  if(!s)return {error:'empty'};
+  const m=s.match(/^(\d[\d.,' _]*?)\s*([kmb])?$/);
+  if(!m)return {error:`"${text}" is not a GP amount. Use digits, optionally with k, m or b (e.g. 1.5m).`};
+  let n;
+  if(m[2]){
+    const parts=m[1].split(/[.,]/);
+    if(/[' _]/.test(m[1])||parts.length>2)return {error:`"${text}" is ambiguous. Write it as e.g. 1.5m or 1500k.`};
+    n=Number(parts.join('.'))*{k:1e3,m:1e6,b:1e9}[m[2]];
+    if(!Number.isInteger(Math.round(n*1e6)/1e6))return {error:`"${text}" is not a whole GP amount.`};
+    n=Math.round(n);
+  }else{
+    if(/^\d+$/.test(m[1]))n=Number(m[1]);
+    else if(/^\d{1,3}([.,' _]\d{3})+$/.test(m[1])&&new Set(m[1].replace(/\d/g,'')).size===1)n=Number(m[1].replace(/\D/g,''));
+    else return {error:`"${text}" is not a whole GP amount. Use e.g. 1500000, 1.500.000 or 1.5m.`};
+  }
+  if(!Number.isSafeInteger(n)||n<=0)return {error:`"${text}" must be more than 0 GP.`};
+  return {value:n};
+}
+// A GP amount typed into one of the controls, in any form parseGpAmount accepts ("380m", "1.5b",
+// "1.500.000"). Anything unreadable reads as 0, exactly as an empty number field did before these
+// fields accepted text at all, so a half-typed value never throws or silently trades on a wrong number.
+function gpFieldValue(id){
+  const el=document.getElementById(id);
+  const raw=el&&el.value!==undefined?String(el.value):'';
+  if(!raw.trim())return 0;
+  const parsed=parseGpAmount(raw);
+  return parsed.value??0;
+}
+const pct=n=>Number.isFinite(n)?(n*100).toFixed(n*100>=10?1:2)+'%':'—';
+const hfmt=h=>!Number.isFinite(h)?'—':h<1?Math.round(h*60)+'m':h<24?h.toFixed(1)+'h':(h/24).toFixed(1)+'d';
+const key=s=>(s||'').trim().toLowerCase();
+function geTax(price){ return price>=50 ? Math.min(5000000, Math.floor(price*0.02)) : 0; }
+
+function piecewise(x, pts){
+  if(x<=pts[0][0]) return pts[0][1];
+  for(let i=1;i<pts.length;i++){
+    if(x<=pts[i][0]){
+      let [x0,y0]=pts[i-1],[x1,y1]=pts[i];
+      return y0+(y1-y0)*(x-x0)/(x1-x0);
+    }
+  }
+  return pts[pts.length-1][1];
+}
+
+function personalScore(h){
+  if(!h) return 7.5;
+  const shrunkWin=(h.wins+3.5)/(h.trades+5); // neutral prior ~70%
+  const wr=clamp((shrunkWin-.5)/.45)*7.0;
+  const roi=clamp((h.medianRoi||0)/.06)*4.0;
+  const repeat=clamp(Math.log1p(h.trades)/Math.log(16))*3.0;
+  let s=wr+roi+repeat;
+  if(h.totalProfit<0) s-=3;
+  return clamp(s,0,15);
+}
+
+function feedbackPenalty(itemName){
+  const f=feedback[key(itemName)];
+  if(!f) return 0;
+  return f==='great'?2:f==='slow'?-3:f==='bad'?-7:0;
+}
+
+function classifyMode(limit,v5,v1,histHold){
+  const l=Math.max(1,limit||1);
+  const r5=v5/l, r1=v1/l;
+  if(r5>=0.10 || r1>=1.25) return 'Fast';
+  if(r1>=0.30) return 'Medium';
+  if(r1>=0.04) return 'Overnight';
+  if(Number.isFinite(histHold) && histHold<=24) return 'Overnight';
+  return 'Slow';
+}
+
+// Suggestion preferences (scanner/preferences.js): saved profit target + holding period, read here
+// so buildRows/filteredRows can actually apply them instead of only sitting in localStorage. profit
+// is a total-profit-after-tax floor (0 = Auto = no filter, matches the <select>'s "Auto" option).
+// timeframe is null until the user explicitly clicks Save (never defaulted to one of the dropdown's
+// buckets), so a scanner that's never touched this panel scores and filters exactly as before this
+// existed -- see holdFitScore's null branch below, which reproduces the original hardcoded weights.
+let suggestionPrefs = loadJSON('eviSuggestionPreferences', {version:1, profit:0, timeframe:null});
+
+// Maps the preferences panel's holding-period buckets onto the same Fast/Medium/Overnight/Slow
+// categories classifyMode already produces, so a saved preference can be compared against a row's
+// own classified mode. 5m/1h read as Fast (a same-session flip), 6h as Medium, 12h/24h as Overnight,
+// 72h/168h as Slow (a multi-day hold). Returns null for an unrecognised value, same as no preference.
+function holdingPeriodMode(timeframe){
+  return {'5m':'Fast','1h':'Fast','6h':'Medium','12h':'Overnight','24h':'Overnight','72h':'Slow','168h':'Slow'}[timeframe] || null;
+}
+const HOLD_MODE_ORDER=['Fast','Medium','Overnight','Slow'];
+// The 0-10 holding-time-fit term folded into buildRows' score. With no saved preference (preferredMode
+// null) this reproduces the original fixed weighting exactly (Medium/Overnight favoured, Fast decent,
+// Slow weak) -- unchanged scanner behaviour for anyone who's never used the preferences panel. With a
+// preference, a row's own classified mode is instead scored by how far it sits from the preferred
+// bucket: an exact match is a full 10, and the reward falls off the further away the row's mode is.
+function holdFitScore(mode, preferredMode){
+  if(!preferredMode) return mode==='Medium'?10:mode==='Overnight'?10:mode==='Fast'?7:2;
+  const dist=Math.abs(HOLD_MODE_ORDER.indexOf(mode)-HOLD_MODE_ORDER.indexOf(preferredMode));
+  return dist===0?10:dist===1?6:dist===2?3:1;
+}
+
+let predictions = loadJSON('eviPredictions', {});
+let predictionLog = loadJSON('eviPredictionLog', []);
+
+function midpointPoint(x){
+  const hi=Number(x.avgHighPrice), lo=Number(x.avgLowPrice);
+  if(Number.isFinite(hi)&&hi>0&&Number.isFinite(lo)&&lo>0)return (hi+lo)/2;
+  if(Number.isFinite(hi)&&hi>0)return hi;
+  if(Number.isFinite(lo)&&lo>0)return lo;
+  return null;
+}
+function linSlope(vals){
+  const a=vals.filter(Number.isFinite); if(a.length<3)return 0;
+  const n=a.length, mx=(n-1)/2, my=a.reduce((s,v)=>s+v,0)/n;
+  let num=0,den=0; for(let i=0;i<n;i++){num+=(i-mx)*(a[i]-my);den+=(i-mx)*(i-mx)}
+  return den?num/den:0;
+}
+function ret(a,b){return (Number.isFinite(a)&&a>0&&Number.isFinite(b))?(b/a-1):0}
+function volOf(vals){
+  const rs=[];for(let i=1;i<vals.length;i++)if(vals[i-1]>0&&vals[i]>0)rs.push(Math.log(vals[i]/vals[i-1]));
+  if(rs.length<2)return 0;
+  const m=rs.reduce((a,b)=>a+b,0)/rs.length;
+  return Math.sqrt(rs.reduce((a,b)=>a+(b-m)*(b-m),0)/(rs.length-1));
+}
+function forecastFromSeries(series, horizon){
+  const clean=(series||[]).filter(x=>midpointPoint(x)!==null).sort((a,b)=>a.timestamp-b.timestamp);
+  if(clean.length<8)return {label:'Uncertain',dir:0,confidence:20,move:0};
+  const mids=clean.map(midpointPoint), last=mids[mids.length-1];
+  const n=horizon==='1h'?12:horizon==='6h'?18:28;
+  const recent=mids.slice(-n), prev=mids.slice(-Math.min(mids.length,n*2),-n);
+  const slope=linSlope(recent)/(last||1);
+  const momentum=ret(recent[0],recent[recent.length-1]);
+  const longer=prev.length>=3?ret(prev[0],prev[prev.length-1]):momentum;
+  const volatility=volOf(recent);
+  const vols=clean.slice(-n).map(x=>(x.highPriceVolume||0)+(x.lowPriceVolume||0));
+  const buyVol=clean.slice(-n).reduce((s,x)=>s+(x.highPriceVolume||0),0);
+  const sellVol=clean.slice(-n).reduce((s,x)=>s+(x.lowPriceVolume||0),0);
+  const imbalance=(buyVol-sellVol)/Math.max(1,buyVol+sellVol);
+  const mean=recent.reduce((a,b)=>a+b,0)/recent.length;
+  const deviation=(last-mean)/Math.max(1,mean);
+
+  let signal=0.45*momentum + 4.0*slope + 0.012*imbalance + 0.12*longer;
+  // Small mean-reversion term only after a meaningful deviation.
+  if(Math.abs(deviation)>.025) signal += -0.08*deviation;
+
+  const noise=Math.max(.002,volatility*Math.sqrt(Math.max(1,recent.length/4)));
+  const strength=Math.abs(signal)/noise;
+  let confidence=Math.round(clamp(42+strength*22,42,88));
+  if(clean.length<20)confidence=Math.min(confidence,60);
+
+  const threshold=Math.max(.0025,noise*.35);
+  let label='Stable',dir=0;
+  if(signal>threshold){label='Likely rising';dir=1}
+  else if(signal<-threshold){label='Likely falling';dir=-1}
+  else if(momentum<-.02 && deviation<-.015 && signal>=-threshold){label='Possible rebound';dir=0.5}
+  return {label,dir,confidence,move:signal,volatility,deviation,imbalance};
+}
+function predClass(p){return !p?'flat':p.dir===1?'up':p.dir===-1?'down':p.dir===.5?'rebound':'flat'}
+function predArrow(p){return !p?'—':p.dir===1?'↑':p.dir===-1?'↓':p.dir===.5?'↗':'→'}
+function predCell(p){
+  if(!p)return '<span class="muted">not loaded</span>';
+  return `<span class="pred ${predClass(p)}">${predArrow(p)} ${escapeHtml(p.label)} · ${p.confidence}</span>`;
+}
+function horizonCell(p){
+  if(!p)return '<span class="muted">—</span>';
+  const mv=(p.move*100);
+  return `<span class="${p.dir===1?'good':p.dir===-1?'bad':'warn'}">${predArrow(p)} ${mv>=0?'+':''}${mv.toFixed(2)}%</span>`;
+}
+async function fetchSeries(id,timestep){
+  const u=`/api/market/timeseries?timestep=${encodeURIComponent(timestep)}&id=${encodeURIComponent(id)}`;
+  const r=await fetch(u,{cache:'no-store'}); if(!r.ok)throw new Error('timeseries '+r.status);
+  const j=await r.json(); return j.data||[];
+}
+async function loadPredictions(){
+  const btn=document.getElementById('predictBtn'), st=document.getElementById('status');
+  const candidates=filteredRows().slice(0,30);
+  if(!candidates.length)return;
+  btn.disabled=true;
+  st.textContent=`Loading historical price series for ${candidates.length} visible candidates…`;
+  let done=0, failed=0;
+  // Paced deliberately, and here is the honest arithmetic, because an earlier version of this
+  // comment claimed a politeness it did not deliver. This is the one thing EVI does that resembles
+  // bulk history scraping: 30 candidates x three timesteps is **90 requests**. BATCH is two ITEMS,
+  // and each item fetches its three timesteps at once, so a batch is six requests in flight and the
+  // whole press lands in roughly ten to fifteen seconds -- call it **six or seven requests a
+  // second**, not the one a second the Wiki suggests as a rule of thumb.
+  //
+  // It is left at that rate on purpose (novi's call, 26 Sept 2026). One request at a time would
+  // honour the rule of thumb and take about ninety seconds, which is a worse button, and this only
+  // fires when someone presses it. Two things keep it defensible: it never runs on its own, and a
+  // repeat press inside five minutes reaches the bridge's cache instead of the Wiki (that window is
+  // now set explicitly in server.mjs rather than inherited, so it cannot quietly stop being true).
+  // If the Wiki ever objects, drop BATCH to 1 and raise PAUSE_MS -- the maths above is the argument.
+  const BATCH=2, PAUSE_MS=350;
+  for(let i=0;i<candidates.length;i+=BATCH){
+    if(i)await new Promise(done=>setTimeout(done,PAUSE_MS));
+    const batch=candidates.slice(i,i+BATCH);
+    await Promise.all(batch.map(async r=>{
+      try{
+        const [s5,s1,s6]=await Promise.all([fetchSeries(r.id,'5m'),fetchSeries(r.id,'1h'),fetchSeries(r.id,'6h')]);
+        const p1=forecastFromSeries(s5,'1h');
+        const p6=forecastFromSeries(s1,'6h');
+        const po=forecastFromSeries(s6,'overnight');
+        const combo = (p1.dir*(p1.confidence/100)*.2)+(p6.dir*(p6.confidence/100)*.4)+(po.dir*(po.confidence/100)*.4);
+        const overall={
+          label:combo>.20?'Likely rising':combo<-.20?'Likely falling':combo>.07?'Slightly rising':combo<-.07?'Slightly falling':'Stable',
+          dir:combo>.07?1:combo<-.07?-1:0,
+          confidence:Math.round((p1.confidence+p6.confidence+po.confidence)/3)
+        };
+        predictions[String(r.id)]={ts:Date.now(),p1,p6,po,overall};
+        predictionLog.push({ts:Date.now(),id:r.id,name:r.name,buy:r.buy,sell:r.sell,p1,p6,po});
+        done++;
+      }catch(e){failed++;console.warn('prediction failed',r.name,e)}
+    }));
+    st.textContent=`Prediction engine: ${done}/${candidates.length} loaded${failed?` · ${failed} failed`:''}…`;
+  }
+  predictionLog=predictionLog.slice(-3000);
+  saveJSON('eviPredictions',predictions);saveJSON('eviPredictionLog',predictionLog);
+  if(market){rows=buildRows(market.mapping,market.latest,market.m5,market.h1);rebuildNewsMatches();}
+  render();
+  st.innerHTML=`<span class="good">Predictions loaded:</span> ${done} candidates${failed?` · ${failed} failed`:''}. Confidence is model strength, not proven historical accuracy yet.`;
+  btn.disabled=false;
+}
+
+function buildRows(mapping, latest, m5, h1){
+  const now=Math.floor(Date.now()/1000);
+  const maxPos=Math.max(0,gpFieldValue('maxPos'));
+  const out=[];
+  for(const item of mapping){
+    const id=String(item.id);
+    const p=latest[id]; if(!p || !p.high || !p.low || p.high<=0 || p.low<=0) continue;
+    const tax=geTax(p.high), net=p.high-p.low-tax;
+    if(net<=0) continue;
+    const roi=net/p.low;
+    const d5=m5[id]||{}, d1=h1[id]||{};
+    const v5=(d5.highPriceVolume||0)+(d5.lowPriceVolume||0);
+    const v1=(d1.highPriceVolume||0)+(d1.lowPriceVolume||0);
+    if(v1<=0 && v5<=0) continue;
+    const limit=item.limit||1;
+    const hist=history[key(item.name)];
+    const histHold=hist?hist.medianHoldH:null;
+    const mode=classifyMode(limit,v5,v1,histHold);
+
+    // Never recommend an item if even ONE unit exceeds the user's max position or bankroll.
+    const bankroll=Math.max(0,gpFieldValue('bankroll'));
+    const affordableByPosition=Math.floor(maxPos/p.low);
+    const affordableByBankroll=Math.floor(bankroll/p.low);
+    if(affordableByPosition < 1 || affordableByBankroll < 1) continue;
+
+    // Conservative quantity: never use more than maxPos, bankroll, buy limit,
+    // or a liquidity-based slice of recent hourly low-side volume.
+    const lowVol1=d1.lowPriceVolume||Math.max(1,Math.floor(v1/2));
+    const liqQty=Math.max(1,Math.floor(lowVol1*(mode==='Fast'?.18:mode==='Medium'?.30:.45)));
+    const qty=Math.min(limit, affordableByPosition, affordableByBankroll, liqQty);
+    if(qty < 1) continue;
+    const capital=qty*p.low, expected=qty*net;
+
+    const opp=piecewise(roi,[[0,0],[.005,5],[.01,10],[.02,16],[.04,22],[.07,25]]);
+    const turnover=v1/Math.max(1,limit);
+    const absVol=clamp(Math.log1p(v1)/Math.log(10001));
+    const liq=20*clamp(.52*absVol+.48*clamp(turnover/1.25));
+    const histScore=personalScore(hist);
+    // The 15-point "expected absolute profit" component was REMOVED on 2026-09-26, at novi's
+    // decision, after it was measured: see the README entry. It rewarded a large absolute profit,
+    // which on any given day means a big position in something illiquid -- the same failure that
+    // took the bridge's personal ranking down -- and it double-counted the minimum-profit setting
+    // the player already controls. Removing it roughly doubled the median trade, halved the capital
+    // left unsold, and cut the worst trade from -4,111,256 to -107,670 at novi's own scale.
+    // `expected` itself is untouched: it is still computed, shown in the table and sortable.
+
+    let holdScore=holdFitScore(mode, suggestionPrefs.timeframe?holdingPeriodMode(suggestionPrefs.timeframe):null);
+    if(hist && Number.isFinite(histHold)){
+      if(histHold>=2 && histHold<=18) holdScore=Math.min(10,holdScore+2);
+      if(histHold>24) holdScore-=2;
+      if(histHold>72) holdScore-=4;
+    }
+    holdScore=clamp(holdScore,0,10);
+
+    const age=Math.max(now-(p.highTime||0), now-(p.lowTime||0));
+    const fresh=age<=600?1:age<=1800?.75:age<=3600?.4:.1;
+    let oneHNet=null, spreadRatio=null;
+    if(d1.avgHighPrice && d1.avgLowPrice){
+      oneHNet=d1.avgHighPrice-d1.avgLowPrice-geTax(d1.avgHighPrice);
+      if(oneHNet>0) spreadRatio=net/oneHNet;
+    }
+    let stability=10*fresh;
+    if(spreadRatio!==null){
+      if(spreadRatio>2.4 || spreadRatio<.35) stability-=5;
+      else if(spreadRatio>1.8 || spreadRatio<.55) stability-=2.5;
+    }
+    stability=clamp(stability,0,10);
+
+    // "Crowding" is deliberately labeled a proxy. High means suspicious compressed/abnormal or thin market.
+    let crowd=25;
+    if(spreadRatio!==null){
+      if(spreadRatio<.55) crowd+=35; // current spread compressed vs hourly average
+      if(spreadRatio>2.0) crowd+=25; // suspicious / likely stale or temporary
+    }
+    if(turnover<.05) crowd+=25;
+    if(age>1800) crowd+=20;
+    crowd=clamp(crowd,0,100);
+    const marketQuality=5*(1-crowd/100);
+
+    const pred=predictions[id];
+    let predAdj=0;
+    if(pred){
+      const relevant=mode==='Fast'?pred.p1:mode==='Medium'?pred.p6:pred.po;
+      if(relevant) predAdj=relevant.dir*(relevant.confidence/100)*6;
+    }
+    // The six remaining components total 85, so they are rescaled to keep the score on the same
+    // 0-100 range it has always been on: a saved minimum-score filter and the colour bands go on
+    // meaning what they meant. A uniform factor cannot change the order of anything, so this is
+    // exactly the ranking that was measured. Feedback and the prediction stay absolute adjustments.
+    const base=(opp+liq+histScore+holdScore+stability+marketQuality)*(100/85);
+    let score=base+feedbackPenalty(item.name)+predAdj;
+    if(mode==='Slow') score-=10;
+    score=clamp(score,0,100);
+
+    out.push({
+      id:item.id,name:item.name,members:item.members,limit,buy:p.low,sell:p.high,net,roi,v5,v1,qty,capital,expected,
+      icon:item.icon||null,highalch:item.highalch??null,tax,highTime:p.highTime||null,lowTime:p.lowTime||null,
+      avgHigh1h:d1.avgHighPrice??null,avgLow1h:d1.avgLowPrice??null,
+      hist,mode,score,crowd,age,turnover,spreadRatio,pred:predictions[id]||null
+    });
+  }
+  return out.sort((a,b)=>b.score-a.score);
+}
+
+// Pushes the scanner's own top-ranked shortlist (this account's personal history, liquidity,
+// stability and -- once the Predict button has been used -- price-direction prediction too, not
+// just current margin) to the bridge, so the RuneLite plugin's "Include market-wide suggestions"
+// setting can use it instead of its own plainer catalogue-wide ranking. See POST
+// /api/scanner-suggestions and computePushedSuggestion in bridge/suggestions.mjs. Best-effort and
+// silent on failure: the plugin simply falls back to its own ranking, exactly as if this never ran,
+// so a bridge that's mid-restart or a dropped connection never surfaces an error here. Only the
+// current rows -- already gated behind the unlocked scanner cookie every other fetch here uses --
+// nothing else about you is sent.
+async function pushSuggestions(){
+  if(!rows.length)return;
+  const items=rows.slice(0,20).map(r=>({itemId:r.id,name:r.name,buy:r.buy,sell:r.sell,net:r.net,qty:r.qty,score:r.score,mode:r.mode}));
+  try{
+    await fetch('/api/scanner-suggestions',{method:'POST',headers:{'Content-Type':'application/json','X-EVI-UI':'1'},body:JSON.stringify({items}),signal:AbortSignal.timeout(5000)});
+  }catch(_){ /* best-effort -- see doc above */ }
+}
+async function refresh(){
+  const st=document.getElementById('status');
+  st.textContent='Fetching mapping + latest + 5-minute + 1-hour market data…';
+  document.getElementById('refresh').disabled=true;
+  try{
+    const [mapR,latestR,m5R,h1R]=await Promise.all(Object.values(API).map(u=>fetch(u,{cache:'no-store'})));
+    if(!mapR.ok||!latestR.ok||!m5R.ok||!h1R.ok) throw new Error('One or more RuneScape Wiki API requests failed.');
+    const [mapping,latestJ,m5J,h1J]=await Promise.all([mapR.json(),latestR.json(),m5R.json(),h1R.json()]);
+    market={mapping,latest:latestJ.data||{},m5:m5J.data||{},h1:h1J.data||{}};
+    rows=buildRows(market.mapping,market.latest,market.m5,market.h1);
+    rebuildNewsMatches();render();pushSuggestions();
+    st.innerHTML='<span class="good">Live market loaded.</span> Prices are observations, not guaranteed offers. Last refresh: '+new Date().toLocaleTimeString();
+    document.getElementById('updated').textContent=new Date().toLocaleTimeString();
+  }catch(e){
+    st.innerHTML='<span class="bad">Could not load live prices.</span> '+escapeHtml(e.message)+' If you opened this file directly and your browser blocks the API, try another browser or serve the file from a simple local web server.';
+    console.error(e);
+  }finally{ document.getElementById('refresh').disabled=false; }
+}
+
+function itemAccessLabel(value){return value===true?'Members':value===false?'Free-to-play':'Access unknown'}
+// Click-to-sort on the scanner's own column headers. The default stays the EVI score, high first --
+// what buildRows already ranked by -- so the list a player opens is unchanged until they ask for
+// something else. Only columns that mean something to sort are clickable: a prediction badge or the
+// feedback buttons have no order worth imposing. The choice is remembered per browser.
+const SORTABLE={0:'score',1:'name',2:'mode',8:'buy',9:'sell',10:'net',11:'roi',12:'v5',13:'v1',14:'limit',15:'qty',16:'capital',17:'expected',18:'histProfit',19:'histHold',20:'crowd'};
+// Text sorts A-Z first; every number sorts high-first, because "best" is the high end of each of
+// these columns. A missing value always sinks, whichever way the column is pointing -- an item with
+// no record of its own should never top the list just because the field is blank.
+const SORT_TEXT=new Set(['name','mode']);
+let sortBy={key:'score',dir:-1};
+try{const saved=JSON.parse(localStorage.getItem('eviSort')||'null');if(saved&&(saved.key==='score'||Object.values(SORTABLE).includes(saved.key)))sortBy=saved;}catch{}
+function sortValue(row,key){
+  if(key==='histProfit')return row.hist?row.hist.totalProfit:null;
+  if(key==='histHold')return row.hist?row.hist.medianHoldH:null;
+  return row[key];
+}
+function sortRows(list){
+  const {key,dir}=sortBy;
+  const text=SORT_TEXT.has(key);
+  return [...list].sort((a,b)=>{
+    const x=sortValue(a,key),y=sortValue(b,key);
+    const xMissing=x===null||x===undefined||(typeof x==='number'&&!Number.isFinite(x));
+    const yMissing=y===null||y===undefined||(typeof y==='number'&&!Number.isFinite(y));
+    if(xMissing||yMissing)return xMissing&&yMissing?0:xMissing?1:-1;
+    const cmp=text?String(x).localeCompare(String(y)):x-y;
+    return dir>0?cmp:-cmp;
+  });
+}
+function setSort(key){
+  // Clicking the column already sorted flips it; a new column starts at its natural end -- A-Z for
+  // text, high-first for numbers.
+  sortBy=sortBy.key===key?{key,dir:-sortBy.dir}:{key,dir:SORT_TEXT.has(key)?1:-1};
+  try{localStorage.setItem('eviSort',JSON.stringify(sortBy));}catch{}
+  markSortedHeader();
+  render();
+}
+function markSortedHeader(){
+  const heads=document.querySelectorAll('#scannerTable thead th');
+  if(!heads||!heads.length)return;
+  heads.forEach((th,i)=>{
+    const key=SORTABLE[i];
+    if(!th.dataset.label)th.dataset.label=th.textContent;
+    th.style.cursor=key?'pointer':'';
+    th.title=key?'Sort by this column':'';
+    th.textContent=th.dataset.label+(key&&key===sortBy.key?(sortBy.dir>0?' ▲':' ▼'):'');
+  });
+}
+function wireSorting(){
+  const heads=document.querySelectorAll('#scannerTable thead th');
+  if(!heads||!heads.length)return;
+  heads.forEach((th,i)=>{const key=SORTABLE[i];if(key)th.addEventListener('click',()=>setSort(key));});
+  markSortedHeader();
+}
+
+function filteredRows(){
+  const min=+document.getElementById('minScore').value||0;
+  const mode=document.getElementById('mode').value;
+  const q=key(document.getElementById('search').value);
+  const access=document.getElementById('itemAccess').value;
+  // Saved "Profit target after tax" preference: 0 (the select's "Auto" option) means no filter, same
+  // as every other optional threshold in this scanner. r.expected is buildRows' own total-profit-
+  // after-tax estimate at its conservative suggested quantity -- the same number shown in the Expected
+  // column and used by Suggested GE Slots, so this and that panel agree on what "meets the target" means.
+  const planProfit=Number(suggestionPrefs.profit)||0;
+  // Gear or bulk focus: the same line the bridge draws (focusAllows / BULK_MIN_LIMIT in
+  // bridge/suggestions.mjs), by each item's own buy limit. Kept in step by hand; change both together.
+  const focus=(document.getElementById('focusPick')||{}).value||'any';
+  return sortRows(rows.filter(r=>(!access||access==='all'||(access==='free'&&r.members===false)||(access==='members'&&r.members===true)) && r.score>=min && (mode==='all'||r.mode===mode) && (!q||key(r.name).includes(q)) && (planProfit<=0||r.expected>=planProfit) && (focus==='any'||(focus==='bulk'?r.limit>=1000:(r.limit>0&&r.limit<1000)))));
+}
+
+function scoreClass(s){return s>=90?'s90':s>=75?'s75':s>=60?'s60':'slow'}
+function crowdClass(c){return c<35?'good':c<65?'warn':'bad'}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
+function histText(h){
+  if(!h)return '<span class="muted">new</span>';
+  return `${h.trades}x · ${gp(h.totalProfit)} · ${Math.round(h.winRate*100)}%`;
+}
+
+
+const OFFICIAL_NEWS_RSS='/api/news';
+let osrsNews=loadJSON('eviOsrsNews',[]);
+let newsMatches={};
+
+function newsSignal(text){
+  const s=(text||'').toLowerCase();
+  if(/nerf|reduc(ed|tion)|weaken|less common|lower(ed)? drop|remove(d)?/.test(s))
+    return {label:'Potential negative / supply change',cls:'hot'};
+  if(/buff|increase(d)?|improve(d)?|more common|new reward|new drop|tripled|boost(ed)?/.test(s))
+    return {label:'Potential positive / supply change',cls:'watch'};
+  if(/poll|proposal|upcoming|launch|release|changes|update/.test(s))
+    return {label:'Upcoming catalyst',cls:'watch'};
+  return {label:'Information',cls:'info'};
+}
+function newsType(text){
+  const s=(text||'').toLowerCase();
+  if(/poll|proposal|blog/.test(s))return 'Pre-update';
+  if(/out today|live now|game update|changelog/.test(s))return 'Live update';
+  if(/event|starts|begins|launch/.test(s))return 'Event / launch';
+  return 'Announcement';
+}
+function itemAliases(name){
+  const n=(name||'').toLowerCase();
+  const out=[n];
+  out.push(n.replace(/\([^)]*\)/g,'').trim());
+  out.push(n.replace(/\+ ?\d+/g,'').trim());
+  return [...new Set(out.filter(x=>x.length>=4))];
+}
+function rebuildNewsMatches(){
+  newsMatches={};
+  if(!market || !market.mapping)return;
+  const items=market.mapping;
+  for(const article of osrsNews){
+    const hay=((article.title||'')+' '+(article.description||'')).toLowerCase();
+    const matched=[];
+    for(const item of items){
+      const aliases=itemAliases(item.name);
+      if(aliases.some(a=>hay.includes(a))){
+        matched.push(item.name);
+        if(!newsMatches[String(item.id)])newsMatches[String(item.id)]=[];
+        newsMatches[String(item.id)].push(article);
+      }
+    }
+    article.matched=[...new Set(matched)].slice(0,30);
+  }
+}
+function newsBadge(id){
+  const arr=newsMatches[String(id)]||[];
+  if(!arr.length)return '<span class="muted">—</span>';
+  const sig=newsSignal(arr.map(x=>(x.title||'')+' '+(x.description||'')).join(' '));
+  return `<span class="newsflag ${sig.cls}" title="${escapeHtml(arr[0].title||'Official OSRS announcement')}">⚠ ${arr.length} catalyst${arr.length===1?'':'s'}</span>`;
+}
+function safeNewsLink(link){try{const u=new URL(link);return u.protocol==='https:' && ['secure.runescape.com','oldschool.runescape.com','www.runescape.com'].includes(u.hostname)?u.href:'#'}catch(_){return '#'}}
+function renderNews(){
+  const tb=document.querySelector('#newsTable tbody');
+  if(!tb)return;
+  tb.innerHTML=(osrsNews||[]).slice(0,30).map(n=>{
+    const sig=newsSignal((n.title||'')+' '+(n.description||''));
+    const items=(n.matched||[]).slice(0,12);
+    return `<tr>
+      <td>${escapeHtml(n.date||'—')}</td>
+      <td><a class="newslink" href="${escapeHtml(safeNewsLink(n.link))}" target="_blank" rel="noopener"><b>${escapeHtml(n.title||'Untitled')}</b></a>
+        <div class="muted">${escapeHtml((n.description||'').replace(/<[^>]+>/g,' ').slice(0,220))}</div></td>
+      <td>${newsType((n.title||'')+' '+(n.description||''))}</td>
+      <td><span class="newsflag ${sig.cls}">${escapeHtml(sig.label)}</span></td>
+      <td>${items.length?items.map(escapeHtml).join(', '):'<span class="muted">No exact item-name match</span>'}</td>
+    </tr>`;
+  }).join('');
+}
+async function refreshNews(){
+  const st=document.getElementById('newsStatus');
+  const btn=document.getElementById('newsBtn');
+  btn.disabled=true; st.textContent='Checking official Jagex OSRS news…';
+  try{
+    const r=await fetch(OFFICIAL_NEWS_RSS,{cache:'no-store'});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const xml=await r.text();
+    const doc=new DOMParser().parseFromString(xml,'text/xml');
+    const items=[...doc.querySelectorAll('item')].slice(0,40).map(it=>({
+      title:it.querySelector('title')?.textContent?.trim()||'',
+      link:it.querySelector('link')?.textContent?.trim()||'',
+      description:it.querySelector('description')?.textContent?.trim()||'',
+      date:it.querySelector('pubDate')?.textContent?.trim()||''
+    }));
+    if(!items.length)throw new Error('No RSS items returned');
+    osrsNews=items; saveJSON('eviOsrsNews',osrsNews);
+    rebuildNewsMatches();renderNews();render();
+    st.innerHTML=`<span class="good">Official news refreshed:</span> ${items.length} recent Jagex posts checked. Exact item-name catalyst matches are now shown in the scanner.`;
+  }catch(err){
+    rebuildNewsMatches();renderNews();render();
+    st.innerHTML=`<span class="warn">Direct RSS refresh was blocked by this browser/local-file setup.</span> Saved news data is still shown if available. Your separate ChatGPT OSRS news monitor is unaffected.`;
+  }finally{btn.disabled=false;}
+}
+
+function render(){
+  const f=filteredRows();
+  const tb=document.querySelector('#scannerTable tbody');
+  tb.innerHTML=f.slice(0,350).map(r=>`<tr data-id="${r.id}">
+    <td class="score ${scoreClass(r.score)}">${r.score.toFixed(0)}</td>
+    <td><div class="itemcell">${iconImg(r,28)}<span><b>${escapeHtml(r.name)}</b><br><small>${itemAccessLabel(r.members)}</small></span></div></td>
+    <td><span class="tag ${r.mode.toLowerCase()}">${r.mode}</span></td>
+    <td>${newsBadge(r.id)}</td>
+    <td>${predCell(r.pred?r.pred.overall:null)}</td><td>${horizonCell(r.pred?r.pred.p1:null)}</td><td>${horizonCell(r.pred?r.pred.p6:null)}</td><td>${horizonCell(r.pred?r.pred.po:null)}</td>
+    <td><b>${gpExact(r.buy)}</b></td><td><b>${gpExact(r.sell)}</b></td><td class="good">${gp(r.net)}</td><td>${pct(r.roi)}</td>
+    <td>${gp(r.v5)}</td><td>${gp(r.v1)}</td><td>${gp(r.limit)}</td><td>${gp(r.qty)}</td>
+    <td>${gp(r.capital)}</td><td class="good">${gp(r.expected)}</td><td>${histText(r.hist)}</td>
+    <td>${r.hist?hfmt(r.hist.medianHoldH):'—'}</td>
+    <td class="${crowdClass(r.crowd)}">${Math.round(r.crowd)}%</td>
+    <td class="feedback">
+      <button onclick="setFeedback('${String(r.id)}','${encodeURIComponent(r.name).replace(/'/g,'%27')}','great')">Great</button>
+      <button onclick="setFeedback('${String(r.id)}','${encodeURIComponent(r.name).replace(/'/g,'%27')}','slow')">Slow</button>
+      <button onclick="setFeedback('${String(r.id)}','${encodeURIComponent(r.name).replace(/'/g,'%27')}','bad')">Bad</button>
+    </td>
+  </tr>`).join('');
+  if(openItemId!=null)tb.querySelectorAll('tr').forEach(tr=>tr.classList.toggle('sel',Number(tr.dataset.id)===openItemId));
+  document.getElementById('marketCount').textContent=f.length.toLocaleString();
+  document.getElementById('scannerCount').textContent=f.length>350?`Showing the top 350 of ${f.length.toLocaleString()} candidates, best first -- scroll inside the list, or narrow it with the filters above.`:`${f.length.toLocaleString()} candidates, best first.`;
+  document.getElementById('bestScore').textContent=f[0]?f[0].score.toFixed(0):'—';
+  document.getElementById('bestProfit').textContent=f.length?gp(Math.max(...f.map(x=>x.expected))):'—';
+  renderHistory();
+  renderNews();
+  updateHistCards();
+}
+
+/* ---------- one item, opened ----------
+   Clicking a row opens everything known about that item: the numbers that decide the trade, the
+   player's own offers, and the last 24 hours. The chart is drawn from the bridge's own five-minute
+   archive when it is running, so opening an item costs no Wiki request at all; the Wiki's series is
+   the fallback. Every part fails open: a missing piece says so rather than being drawn as zero. */
+let openItemId=null, openSeries=null;
+
+function iconImg(r,size){
+  if(!r||!r.icon||!r.id)return '';
+  return '<img loading="lazy" alt="" width="'+size+'" height="'+size+'" onerror="this.remove()" src="'
+    +API.icon+'?itemId='+encodeURIComponent(r.id)+'">';
+}
+// The sell price at which this buy exactly breaks even, found against the same tax function the rest
+// of the scanner uses rather than by assuming a flat 2%: the tax is floored per unit and capped, so
+// arithmetic on the rate alone is wrong at both extremes.
+function minSellForBreakEven(buy){
+  if(!Number.isFinite(buy)||buy<0)return null;
+  let lo=Math.floor(buy), hi=Math.ceil(buy+buy/49+64);
+  if((hi-geTax(hi))<buy)return null;
+  while(lo<hi){const mid=Math.floor((lo+hi)/2); if((mid-geTax(mid))>=buy)hi=mid; else lo=mid+1;}
+  return lo;
+}
+function agoText(sec){
+  if(!sec)return 'unknown';
+  const m=Math.max(0,Math.round(Date.now()/1000-sec)/60);
+  return m<1?'just now':m<60?Math.round(m)+'m ago':Math.round(m/60)+'h ago';
+}
+function closeItem(){
+  openItemId=null;openSeries=null;
+  const d=document.getElementById('itemDrawer');d.hidden=true;d.innerHTML='';
+  document.querySelectorAll('#scannerTable tbody tr.sel').forEach(t=>t.classList.remove('sel'));
+}
+async function openItem(id){
+  const r=rows.find(x=>x.id===id); if(!r)return;
+  openItemId=id;openSeries=null;
+  document.querySelectorAll('#scannerTable tbody tr').forEach(tr=>tr.classList.toggle('sel',Number(tr.dataset.id)===id));
+  const d=document.getElementById('itemDrawer');
+  const maxBuy=r.sell-geTax(r.sell), minSell=minSellForBreakEven(r.buy);
+  d.hidden=false;
+  d.innerHTML='<div class="head">'+iconImg(r,40)+'<div><h2>'+escapeHtml(r.name)+'</h2>'
+    +'<div class="detail">Buy limit '+(r.limit?gpExact(r.limit):'none published')+' &middot; '+itemAccessLabel(r.members)+'</div></div></div>'
+    +'<h3>The offer as it stands</h3>'
+    +'<div class="kv">'
+    +'<span class="k">Buy '+gpExact(r.qty)+' at</span><span class="v strong">'+gpExact(r.buy)+'</span>'
+    +'<span class="k">Then sell at</span><span class="v strong">'+gpExact(r.sell)+'</span>'
+    +'<span class="k">Expected, after tax</span><span class="v strong good">'+gp(r.expected)+'</span>'
+    +'<span class="k">Cash needed</span><span class="v">'+gp(r.capital)+'</span>'
+    +'<span class="k">Tax per item</span><span class="v">'+gpExact(r.tax)+'</span>'
+    +'<span class="k">Profit per item</span><span class="v good">'+gpExact(r.net)+'</span>'
+    +'<span class="k strong">Most you can pay and still break even</span><span class="v strong">'+gpExact(maxBuy)+'</span>'
+    +'<span class="k strong">Least you can sell for and still break even</span><span class="v strong">'+(minSell==null?'&mdash;':gpExact(minSell))+'</span>'
+    +'<span class="k">Latest instant-buy</span><span class="v">'+gpExact(r.sell)+' &middot; '+agoText(r.highTime)+'</span>'
+    +'<span class="k">Latest instant-sell</span><span class="v">'+gpExact(r.buy)+' &middot; '+agoText(r.lowTime)+'</span>'
+    +'<span class="k">1h average high / low</span><span class="v">'+(r.avgHigh1h?gp(r.avgHigh1h):'&mdash;')+' / '+(r.avgLow1h?gp(r.avgLow1h):'&mdash;')+'</span>'
+    +'<span class="k">Traded in the last hour</span><span class="v">'+gp(r.v1)+'</span>'
+    +'<span class="k">vs 24h average</span><span class="v" id="drawerTrend">&mdash;</span>'
+    +'<span class="k">High alch</span><span class="v">'+(r.highalch?gpExact(r.highalch):'&mdash;')+'</span>'
+    +'</div>'
+    +'<h3>Last 24 hours</h3><div id="drawerChart" class="detail">Loading the last 24 hours&hellip;</div>'
+    +'<div id="drawerChecks"></div>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">'
+    +'<a class="btn" href="https://prices.runescape.wiki/osrs/item/'+r.id+'" target="_blank" rel="noopener">Wiki price page</a>'
+    +'<button type="button" id="drawerClose">Close</button></div>';
+  document.getElementById('drawerClose').onclick=closeItem;
+  d.scrollTop=0;
+  try{
+    const res=await fetch(API.itemDetail+'?itemId='+r.id+'&hours=24',{signal:AbortSignal.timeout(8000)});
+    if(!res.ok)throw new Error('the bridge answered '+res.status);
+    const j=await res.json();
+    if(openItemId!==id)return;
+    openSeries=j; drawItemChart(r,j); renderItemChecks(j);
+  }catch(e){
+    if(openItemId!==id)return;
+    // No bridge: the Wiki's own series still draws the chart, but EVI's readings need the bridge.
+    try{
+      const w=await fetch('https://prices.runescape.wiki/api/v1/osrs/timeseries?timestep=5m&id='+r.id);
+      const j=await w.json();
+      if(openItemId!==id)return;
+      const from=Math.floor(Date.now()/1000)-86400;
+      openSeries={series:(j.data||[]).filter(p=>p.timestamp>=from),yours:[],fillHistory:null,sellSupport:null,source:'wiki'};
+      drawItemChart(r,openSeries); renderItemChecks(openSeries);
+    }catch(e2){
+      const box=document.getElementById('drawerChart');
+      if(box)box.textContent='The last 24 hours could not be loaded ('+e2.message+').';
+    }
+  }
+}
+// EVI's own two readings, shown only when the bridge answered them. Silence means no view, never "fine".
+function renderItemChecks(j){
+  const box=document.getElementById('drawerChecks'); if(!box)return;
+  let html='';
+  if(j.sellSupport&&j.sellSupport.note)html+='<p class="detail warn">'+escapeHtml(j.sellSupport.note)+'</p>';
+  if(j.fillHistory&&j.fillHistory.text)html+='<p class="detail">'+escapeHtml(j.fillHistory.text)+'</p>';
+  if(!html)html='<p class="detail">EVI has no fill-history reading for this item yet &mdash; that means no view, not a clear run.</p>';
+  box.innerHTML=html;
+}
+function drawItemChart(r,j){
+  const box=document.getElementById('drawerChart'); if(!box)return;
+  const pts=(j.series||[]).filter(p=>p.avgHighPrice||p.avgLowPrice);
+  if(pts.length<3){box.textContent='Not enough trades in the last 24 hours to draw a chart.';return;}
+  // "vs 24h average" is computed from this same series, so the number and the picture always agree.
+  const highs=pts.map(p=>p.avgHighPrice).filter(Boolean);
+  if(highs.length){
+    const mean=highs.reduce((a,b)=>a+b,0)/highs.length, t=(r.sell-mean)/mean, el=document.getElementById('drawerTrend');
+    if(el){el.textContent=(t>0?'+':'')+(t*100).toFixed(1)+'%';el.className='v '+(t<0?'bad':'good');}
+  }
+  const W=380,H=170,pl=54,pr=52,pt=10,pb=22;
+  const yours=(j.yours||[]).filter(o=>Number.isFinite(o.price));
+  const vals=pts.flatMap(p=>[p.avgHighPrice,p.avgLowPrice]).filter(Boolean).concat(yours.map(o=>o.price));
+  let lo=Math.min.apply(null,vals), hi=Math.max.apply(null,vals);
+  const pad=(hi-lo)*0.08||hi*0.01||1; lo-=pad; hi+=pad;
+  const t0=pts[0].timestamp, t1=pts[pts.length-1].timestamp||t0+1;
+  const X=t=>pl+(t-t0)/((t1-t0)||1)*(W-pl-pr), Y=v=>pt+(1-(v-lo)/((hi-lo)||1))*(H-pt-pb);
+  const path=key=>{let d='',pen=false;for(const p of pts){if(!p[key]){pen=false;continue;}d+=(pen?'L':'M')+X(p.timestamp).toFixed(1)+','+Y(p[key]).toFixed(1);pen=true;}return d;};
+  const ticks=[lo+(hi-lo)*0.12,(lo+hi)/2,hi-(hi-lo)*0.12];
+  const last=key=>{for(let i=pts.length-1;i>=0;i--)if(pts[i][key])return pts[i][key];return null;};
+  const lastHigh=last('avgHighPrice'), lastLow=last('avgLowPrice');
+  // The player's own offers: 8px marks with a 2px surface ring so they stay legible over a line.
+  const marks=yours.slice(-8).map(o=>'<circle cx="'+X(o.at/1000).toFixed(1)+'" cy="'+Y(o.price).toFixed(1)+'" r="4" fill="'
+    +(o.buy?'var(--chart-buy)':'var(--chart-sell)')+'" stroke="var(--panel)" stroke-width="2"></circle>').join('');
+  const grid=ticks.map(v=>'<line x1="'+pl+'" x2="'+(W-pr)+'" y1="'+Y(v).toFixed(1)+'" y2="'+Y(v).toFixed(1)+'" stroke="var(--line)" stroke-width="1"></line>'
+    +'<text x="'+(pl-6)+'" y="'+(Y(v)+4).toFixed(1)+'" font-size="10" text-anchor="end" fill="var(--muted)">'+gp(v)+'</text>').join('');
+  // Identity is carried by a coloured chip beside muted text, never by colouring the text itself.
+  const endLabel=(v,colour,text)=>v==null?'':'<rect x="'+(W-pr+4)+'" y="'+(Y(v)-4).toFixed(1)+'" width="8" height="8" rx="2" fill="'+colour+'"></rect>'
+    +'<text x="'+(W-pr+15)+'" y="'+(Y(v)+4).toFixed(1)+'" font-size="10" fill="var(--muted)">'+text+'</text>';
+  box.innerHTML='<div class="chartwrap"><svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Price over the last 24 hours">'
+    +grid
+    +'<path d="'+path('avgHighPrice')+'" fill="none" stroke="var(--chart-buy)" stroke-width="2"></path>'
+    +'<path d="'+path('avgLowPrice')+'" fill="none" stroke="var(--chart-sell)" stroke-width="2"></path>'
+    +endLabel(lastHigh,'var(--chart-buy)','you sell')
+    +endLabel(lastLow,'var(--chart-sell)','you buy')
+    +marks
+    +'<line id="drawerCross" x1="0" x2="0" y1="'+pt+'" y2="'+(H-pb)+'" stroke="var(--muted)" stroke-width="1" opacity="0"></line>'
+    +'<text x="'+pl+'" y="'+(H-5)+'" font-size="10" fill="var(--muted)">24h ago</text>'
+    +'<text x="'+(W-pr)+'" y="'+(H-5)+'" font-size="10" text-anchor="end" fill="var(--muted)">now</text>'
+    +'</svg><div class="charttip" id="drawerTip"></div></div>'
+    +'<div class="legend"><span><i style="background:var(--chart-buy)"></i>Instant-buy price &mdash; where you sell</span>'
+    +'<span><i style="background:var(--chart-sell)"></i>Instant-sell price &mdash; where you buy</span>'
+    +(yours.length?'<span>Dots: your own offers</span>':'')
+    +'<span>'+(j.source==='archive'?'EVI&rsquo;s own archive':'OSRS Wiki series')+'</span></div>';
+  // Crosshair and tooltip: a line chart on a page is meant to be pointed at.
+  const wrap=box.querySelector('.chartwrap'), svg=wrap.querySelector('svg'), tip=wrap.querySelector('#drawerTip'), cross=wrap.querySelector('#drawerCross');
+  const hide=()=>{tip.style.display='none';cross.setAttribute('opacity','0');};
+  svg.addEventListener('mousemove',ev=>{
+    const b=svg.getBoundingClientRect(), xr=(ev.clientX-b.left)/b.width*W;
+    if(xr<pl||xr>W-pr){hide();return;}
+    const t=t0+((xr-pl)/(W-pl-pr))*((t1-t0)||1);
+    let best=pts[0];
+    for(const p of pts)if(Math.abs(p.timestamp-t)<Math.abs(best.timestamp-t))best=p;
+    cross.setAttribute('x1',X(best.timestamp).toFixed(1));
+    cross.setAttribute('x2',X(best.timestamp).toFixed(1));
+    cross.setAttribute('opacity','0.5');
+    tip.style.display='block';
+    tip.style.left=(X(best.timestamp)/W*100)+'%';
+    tip.style.top=(Y(best.avgHighPrice||best.avgLowPrice||lo)/H*100)+'%';
+    tip.innerHTML=new Date(best.timestamp*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})
+      +'<br>you sell '+(best.avgHighPrice?gpExact(best.avgHighPrice):'&mdash;')
+      +'<br>you buy '+(best.avgLowPrice?gpExact(best.avgLowPrice):'&mdash;');
+  });
+  svg.addEventListener('mouseleave',hide);
+}
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&openItemId!=null)closeItem();});
+document.addEventListener('click',e=>{
+  const tr=e.target.closest&&e.target.closest('#scannerTable tbody tr');
+  if(!tr)return;
+  if(e.target.closest('button,a'))return; // the feedback buttons keep their own job
+  const id=Number(tr.dataset.id);
+  if(Number.isFinite(id))id===openItemId?closeItem():openItem(id);
+});
+
+function setFeedback(id,encodedName,val){
+  const name=decodeURIComponent(encodedName);
+  feedback[key(name)]=val; saveJSON('eviFeedback',feedback);
+  if(market){rows=buildRows(market.mapping,market.latest,market.m5,market.h1);render();}
+}
+
+function updateHistCards(){
+  const hs=Object.values(history);
+  document.getElementById('histCount').textContent=hs.length.toLocaleString();
+  document.getElementById('histTrades').textContent=hs.reduce((a,h)=>a+(h.trades||0),0).toLocaleString();
+}
+
+function renderHistory(){
+  const hs=Object.values(history).sort((a,b)=>b.totalProfit-a.totalProfit);
+  document.querySelector('#historyTable tbody').innerHTML=hs.map(h=>`<tr>
+    <td>${h.trades}</td><td><b>${escapeHtml(h.name)}</b></td><td class="${h.totalProfit>=0?'good':'bad'}">${gp(h.totalProfit)}</td>
+    <td>${pct(h.winRate)}</td><td>${gp(h.medianProfit)}</td><td>${pct(h.medianRoi)}</td><td>${hfmt(h.medianHoldH)}</td><td>${gp(h.avgCapital)}</td>
+  </tr>`).join('');
+}
+
+function buildPortfolio(){
+  const bankroll=Math.max(0,gpFieldValue('bankroll'));
+  const slots=Math.max(0,Math.min(8,Math.floor(Number(document.getElementById('slots').value)||0)));
+  const reserve=bankroll*.10;
+  let available=bankroll-reserve;
+  const sortMode=document.getElementById('portfolioSort').value||'score';
+
+  let pool=filteredRows().filter(r=>r.mode!=='Slow' && r.expected>0);
+
+  // Different shortlist priorities while keeping EVI score as a safety filter.
+  if(sortMode==='profit'){
+    pool.sort((a,b)=>(b.expected-a.expected) || (b.score-a.score));
+  }else if(sortMode==='capital'){
+    pool.sort((a,b)=>(a.capital-b.capital) || (b.score-a.score));
+  }else if(sortMode==='qty'){
+    pool.sort((a,b)=>(a.qty-b.qty) || (b.score-a.score));
+  }else{
+    pool.sort((a,b)=>(b.score-a.score) || (b.expected-a.expected));
+  }
+
+  const picks=[];
+  const modes={Fast:0,Medium:0,Overnight:0};
+
+  for(const r of pool){
+    if(picks.length>=slots || available<=0) break;
+    // Avoid making every slot the same time horizon when other good options exist.
+    if(modes[r.mode]>=Math.ceil(slots*.6)) continue;
+
+    const affordable=Math.floor(available/r.buy);
+    if(affordable < 1) continue;
+    const q=Math.min(r.qty, affordable);
+    if(q < 1) continue;
+
+    const cap=q*r.buy, exp=q*r.net;
+    if(cap > available || cap > bankroll) continue;
+    if(cap<50000) continue;
+
+    picks.push({...r,qty:q,capital:cap,expected:exp});
+    available-=cap;
+    modes[r.mode]=(modes[r.mode]||0)+1;
+  }
+
+  document.querySelector('#portfolioTable tbody').innerHTML=picks.map((r,i)=>`<tr>
+    <td>${i+1}</td><td><b>${escapeHtml(r.name)}</b><br><small>${itemAccessLabel(r.members)}</small></td><td class="${scoreClass(r.score)}">${r.score.toFixed(0)}</td>
+    <td><span class="tag ${r.mode.toLowerCase()}">${r.mode}</span></td><td><b>${gpExact(r.buy)}</b></td><td><b>${gpExact(r.sell)}</b></td><td>${gp(r.qty)}</td>
+    <td>${gp(r.capital)}</td><td class="good">${gp(r.expected)}</td>
+  </tr>`).join('');
+
+  const used=picks.reduce((a,r)=>a+r.capital,0), exp=picks.reduce((a,r)=>a+r.expected,0);
+  const label={
+    score:'Best EVI score',
+    profit:'Highest expected profit',
+    capital:'Lowest capital needed',
+    qty:'Lowest quantity to buy'
+  }[sortMode];
+
+  document.getElementById('portfolioSummary').innerHTML=
+    `<b>${picks.length} suggested GE slots</b> · priority: <b>${label}</b> · capital ${gp(used)} · cash left ${gp(bankroll-used)} · displayed-margin profit ${gp(exp)}.<br>
+     <span class="detail">Expected profit assumes the displayed low/high spread is actually obtainable. Treat this as a shortlist to check in-game, not guaranteed GP.</span>`;
+  showView('portfolio');
+}
+
+function parseCSV(text){
+  const rows=[]; let row=[], field='', q=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i], n=text[i+1];
+    if(c==='"'){
+      if(q && n==='"'){field+='"';i++} else q=!q;
+    }else if(c===','&&!q){row.push(field);field=''}
+    else if((c==='\n'||c==='\r')&&!q){
+      if(c==='\r'&&n==='\n')i++;
+      row.push(field);field='';
+      if(row.some(x=>x!==''))rows.push(row);row=[];
+    }else field+=c;
+  }
+  if(field||row.length){row.push(field);rows.push(row)}
+  return rows;
+}
+
+
+function median(a){
+  if(!a.length)return null;
+  const b=[...a].sort((x,y)=>x-y),m=Math.floor(b.length/2);
+  return b.length%2?b[m]:(b[m-1]+b[m])/2;
+}
+
+function extractCopilotRows(text){
+  const arr=parseCSV(text); if(arr.length<2) throw new Error('CSV has no data.');
+  const head=arr[0].map(x=>x.trim());
+  const ix=n=>head.indexOf(n);
+  const required=['First buy time','Last sell time','Item','Bought','Sold','Avg. buy price','Profit'];
+  // Names the columns rather than a product: any tool whose export has these columns works, and a
+  // player with a wrong file learns exactly what is missing instead of guessing.
+  const missing=required.filter(n=>ix(n)<0);
+  if(missing.length) throw new Error('This file is missing columns the import needs: '+missing.join(', ')+'.');
+
+  const out=[];
+  for(let i=1;i<arr.length;i++){
+    const r=arr[i], item=(r[ix('Item')]||'').trim(); if(!item)continue;
+    const sold=+r[ix('Sold')]||0, bought=+r[ix('Bought')]||0, bp=+r[ix('Avg. buy price')]||0, profit=+r[ix('Profit')]||0;
+    const first=(r[ix('First buy time')]||'').trim(), last=(r[ix('Last sell time')]||'').trim();
+    const t1=Date.parse(first), t2=Date.parse(last);
+    if(!(sold>0) || !Number.isFinite(t2))continue;
+    const qty=Math.min(bought>0?bought:sold,sold), capital=qty*bp;
+    const roi=capital>0?profit/capital:null, hold=(t2-t1)/3600000;
+
+    // Stable fingerprint from the identifying fields available in the Copilot export.
+    const fp=[
+      item, first, last, bought, sold,
+      r[ix('Avg. buy price')]||'',
+      head.includes('Avg. sell price') ? (r[ix('Avg. sell price')]||'') : '',
+      profit
+    ].join('|').toLowerCase();
+
+    out.push({fp,item,profit,roi,hold,capital,win:profit>0,loss:profit<0});
+  }
+  return out;
+}
+
+function aggregateRows(rows){
+  const groups={};
+  for(const x of rows){
+    const k=key(x.item);
+    if(!groups[k])groups[k]={name:x.item,profits:[],rois:[],holds:[],caps:[],wins:0,losses:0};
+    const g=groups[k];
+    g.profits.push(x.profit);
+    if(x.roi!==null && Number.isFinite(x.roi))g.rois.push(x.roi);
+    if(Number.isFinite(x.hold))g.holds.push(x.hold);
+    if(x.capital>0)g.caps.push(x.capital);
+    if(x.win)g.wins++;
+    if(x.loss)g.losses++;
+  }
+
+  const out={};
+  for(const [k,g] of Object.entries(groups)){
+    const trades=g.profits.length,total=g.profits.reduce((a,b)=>a+b,0);
+    out[k]={
+      name:g.name,trades,totalProfit:Math.round(total),wins:g.wins,losses:g.losses,
+      medianProfit:Math.round(median(g.profits)||0),
+      avgProfit:Math.round(total/trades),
+      medianRoi:median(g.rois),
+      medianHoldH:median(g.holds),
+      avgCapital:g.caps.length?g.caps.reduce((a,b)=>a+b,0)/g.caps.length:null,
+      winRate:g.wins/trades
+    };
+  }
+  return out;
+}
+
+// Store raw imported rows locally so later imports can be merged and de-duplicated.
+let rawHistoryRows = loadJSON('eviRawHistoryRows', null);
+
+// Seed raw history is unavailable for the original embedded aggregate, so until the first
+// replace import we preserve that aggregate separately and merge future imports at aggregate level.
+let extraRows = loadJSON('eviExtraRows', []);
+let importedFingerprints = loadJSON('eviImportedFingerprints', {});
+
+function mergeAggregateProfiles(base, extra){
+  const out=JSON.parse(JSON.stringify(base||{}));
+  for(const [k,h] of Object.entries(extra||{})){
+    if(!out[k]){ out[k]=h; continue; }
+    const a=out[k], n1=a.trades||0, n2=h.trades||0, nt=n1+n2;
+    const total=(a.totalProfit||0)+(h.totalProfit||0);
+    const wins=(a.wins||0)+(h.wins||0), losses=(a.losses||0)+(h.losses||0);
+
+    // Weighted means where exact recomputation isn't possible from aggregate-only original data.
+    const avgProfit=nt?((a.avgProfit||0)*n1+(h.avgProfit||0)*n2)/nt:0;
+    const avgCapital=nt?((a.avgCapital||0)*n1+(h.avgCapital||0)*n2)/nt:null;
+
+    out[k]={
+      name:a.name||h.name,
+      trades:nt,
+      totalProfit:Math.round(total),
+      wins,losses,
+      medianProfit:n1>=n2?a.medianProfit:h.medianProfit,
+      avgProfit:Math.round(avgProfit),
+      medianRoi:n1>=n2?a.medianRoi:h.medianRoi,
+      medianHoldH:n1>=n2?a.medianHoldH:h.medianHoldH,
+      avgCapital,
+      winRate:nt?wins/nt:0
+    };
+  }
+  return out;
+}
+
+function rebuildHistoryFromExtra(){
+  const extraAgg=aggregateRows(extraRows);
+  history=mergeAggregateProfiles(DEFAULT_HISTORY, extraAgg);
+  saveJSON('eviHistory',history);
+}
+
+
+document.getElementById('csv').addEventListener('change',async e=>{
+  const file=e.target.files[0];if(!file)return;
+  try{
+    const txt=await file.text();
+    const imported=[...new Map(extractCopilotRows(txt).map(x=>[x.fp,x])).values()];
+    const mode=document.getElementById('importMode').value||'merge';
+
+    if(mode==='replace'){
+      rawHistoryRows=imported;
+      importedFingerprints={};
+      for(const x of imported) importedFingerprints[x.fp]=1;
+      extraRows=[];
+      history=aggregateRows(imported);
+
+      saveJSON('eviRawHistoryRows',rawHistoryRows);
+      saveJSON('eviImportedFingerprints',importedFingerprints);
+      saveJSON('eviExtraRows',extraRows);
+      saveJSON('eviHistory',history);
+
+      document.getElementById('status').innerHTML=
+        '<span class="good">History replaced:</span> '+imported.length+' completed flips loaded.';
+    }else{
+      let added=0, skipped=0;
+      for(const x of imported){
+        if(importedFingerprints[x.fp]){ skipped++; continue; }
+        importedFingerprints[x.fp]=1;
+        extraRows.push(x);
+        added++;
+      }
+      saveJSON('eviImportedFingerprints',importedFingerprints);
+      saveJSON('eviExtraRows',extraRows);
+
+      // If a prior replace import exists, rebuild exactly from raw rows + new extras.
+      if(rawHistoryRows && Array.isArray(rawHistoryRows)){
+        const all=[...rawHistoryRows,...extraRows.filter(x=>!rawHistoryRows.some(y=>y.fp===x.fp))];
+        history=aggregateRows(all);
+        saveJSON('eviHistory',history);
+      }else{
+        rebuildHistoryFromExtra();
+      }
+
+      document.getElementById('status').innerHTML=
+        '<span class="good">History merged:</span> '+added+' new completed flips added'
+        +(skipped?(' · '+skipped+' duplicate'+(skipped===1?'':'s')+' skipped'):'')+'.';
+    }
+
+    if(market)rows=buildRows(market.mapping,market.latest,market.m5,market.h1);
+    render();
+  }catch(err){
+    document.getElementById('status').innerHTML='<span class="bad">CSV import failed:</span> '+escapeHtml(err.message);
+  }finally{
+    e.target.value='';
+  }
+});
+
+function showView(v){
+  for(const x of ['scanner','portfolio','history','news','live','lookup'])document.getElementById(x+'View').style.display=x===v?'block':'none';
+  document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
+}
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>showView(b.dataset.view));
+// Per-browser layout preference only; the page works the same without storage.
+(()=>{let full=false;try{full=localStorage.getItem('eviFullLists')==='1';}catch{}
+  const apply=v=>{document.body.classList?.toggle('fulllists',v);document.querySelectorAll('.fullListsToggle').forEach(c=>c.checked=v);};
+  apply(full);
+  document.querySelectorAll('.fullListsToggle').forEach(c=>c.onchange=()=>{apply(c.checked);try{localStorage.setItem('eviFullLists',c.checked?'1':'0');}catch{}});})();
+document.getElementById('refresh').onclick=refresh;
+document.getElementById('portfolioBtn').onclick=buildPortfolio;
+document.getElementById('predictBtn').onclick=loadPredictions;
+document.getElementById('newsBtn').onclick=refreshNews;
+for(const id of ['minScore','mode','search','itemAccess']) document.getElementById(id).addEventListener(id==='search'?'input':'change',render);
+for(const id of ['maxPos','bankroll']) document.getElementById(id).addEventListener('change',()=>{if(market){rows=buildRows(market.mapping,market.latest,market.m5,market.h1);render();}});
+wireSorting();
+updateHistCards();renderHistory();renderNews();refresh();
+setInterval(refresh,60000);
+
+function enableDragScroll(){
+  const candidates=[...document.querySelectorAll('div')].filter(el=>{
+    const cs=getComputedStyle(el);
+    return el.scrollWidth>el.clientWidth &&
+      (cs.overflowX==='auto'||cs.overflowX==='scroll') &&
+      !el.dataset.dragscroll;
+  });
+  candidates.forEach(el=>{
+    el.dataset.dragscroll='1';
+    let down=false,startX=0,startLeft=0,moved=false;
+    el.addEventListener('pointerdown',e=>{
+      // Keep buttons, inputs, selects and links fully clickable.
+      if(e.target.closest('button,input,select,a,label')) return;
+      down=true;moved=false;startX=e.clientX;startLeft=el.scrollLeft;
+      // Capture is taken on the first real drag, not here. Capturing on pointerdown retargets the
+      // pointerup to this wrapper, and the browser then fires the click on the wrapper instead of
+      // whatever was under the cursor -- which is why clicking a sortable column header did nothing
+      // at all while buttons (exempted above) kept working.
+      el.classList.add('dragging');
+    });
+    el.addEventListener('pointermove',e=>{
+      if(!down)return;
+      const dx=e.clientX-startX;
+      if(Math.abs(dx)>3&&!moved){moved=true;el.setPointerCapture?.(e.pointerId);}
+      if(moved){el.scrollLeft=startLeft-dx;e.preventDefault();}
+    });
+    const stop=e=>{
+      if(!down)return;
+      down=false;el.classList.remove('dragging');
+      try{el.releasePointerCapture?.(e.pointerId)}catch(_){}
+    };
+    el.addEventListener('pointerup',stop);
+    el.addEventListener('pointercancel',stop);
+    el.addEventListener('pointerleave',e=>{ if(down && e.buttons===0) stop(e); });
+  });
+}
+
+const dragObserver=new MutationObserver(()=>requestAnimationFrame(enableDragScroll));
+dragObserver.observe(document.body,{childList:true,subtree:true});
+window.addEventListener('load',()=>requestAnimationFrame(enableDragScroll));
+</script>
+<script>
+// Trading focus. Stored by the bridge, not the browser, because the bridge applies it to every
+// suggestion the plugin receives as well -- so changing it here changes what EVI suggests in game,
+// with no plugin setting and no plugin update involved.
+(() => {
+  const pick=document.getElementById('focusPick');
+  if(!pick)return;
+  fetch('/api/preferences',{cache:'no-store'}).then(r=>r.ok?r.json():null).then(p=>{
+    if(p&&p.focus&&pick.value!==p.focus){pick.value=p.focus;pick.dispatchEvent(new Event('change',{bubbles:true}));}
+  }).catch(()=>{});
+  pick.addEventListener('change',()=>{
+    if(typeof render==='function')render();
+    fetch('/api/preferences',{method:'POST',headers:{'Content-Type':'application/json','X-EVI-UI':'1'},body:JSON.stringify({focus:pick.value})}).catch(()=>{});
+  });
+})();
+// Colour scheme: parchment by default, or the plugin's own RuneLite palette. Remembered per browser,
+// and harmless if storage is unavailable -- the page simply opens in the default scheme.
+(() => {
+  const pick=document.getElementById('themePick');
+  if(!pick)return;
+  const apply=v=>{if(v==='runelite')document.documentElement.setAttribute('data-theme','runelite');else document.documentElement.removeAttribute('data-theme');};
+  let saved='osrs';
+  try{saved=localStorage.getItem('eviTheme')||'osrs';}catch{}
+  pick.value=saved;apply(saved);
+  pick.onchange=()=>{apply(pick.value);try{localStorage.setItem('eviTheme',pick.value);}catch{}};
+})();
+(() => {
+  const input=document.getElementById('bankroll'), label=document.getElementById('helpBankroll');
+  const maxPos=document.getElementById('maxPos');
+  // Both fields take a typed amount ("380m", "1.5b", "750k", "1.500.000"), so each shows the exact GP
+  // it was read as -- an amount worth millions should never be acted on while the player is guessing
+  // what EVI made of what they typed. An unreadable entry says so instead of quietly becoming 0.
+  function echo(el){
+    const note=el.parentElement&&el.parentElement.querySelector('.gpecho');
+    if(!note)return null;
+    const raw=String(el.value||'').trim();
+    if(!raw){note.textContent='';return null;}
+    const parsed=parseGpAmount(raw);
+    note.textContent=parsed.value?'= '+gpExact(parsed.value)+' GP':parsed.error;
+    note.className='gpecho detail'+(parsed.value?'':' bad');
+    return parsed.value??null;
+  }
+  function updateBankrollHelp(){
+    const amount=echo(input);
+    echo(maxPos);
+    label.textContent=amount?gpExact(amount)+' GP':'selected';
+  }
+  // Both amounts persist per browser: they are the two figures a player sets once and expects to
+  // still be there tomorrow, and retyping nine digits (or watching a stale 150M rank everything) is
+  // exactly the friction this removes. Stored as typed, so "380m" comes back as "380m".
+  const REMEMBER={bankroll:'eviBankroll',maxPos:'eviMaxPos'};
+  for(const [id,key] of Object.entries(REMEMBER)){
+    const el=document.getElementById(id);
+    if(!el)continue;
+    try{const saved=localStorage.getItem(key);if(saved!==null&&saved.trim()&&parseGpAmount(saved).value)el.value=saved;}catch{}
+    el.addEventListener('change',()=>{try{localStorage.setItem(key,el.value);}catch{}});
+  }
+  for(const el of [input,maxPos]){el.addEventListener('input',updateBankrollHelp);el.addEventListener('change',updateBankrollHelp);}
+  updateBankrollHelp();
+  // Whatever was restored has to reach the ranking, which only rebuilds on a change event.
+  for(const el of [input,maxPos])el.dispatchEvent(new Event('change'));
+})();
+</script><script src="/live.js"></script><script src="/lookup.js"></script>
+<section style="margin:24px" id="xlogPanel"><h2>Bring your Exchange Logger history</h2>
+<p>If you have been running the <b>Exchange Logger</b> plugin, EVI can read its logs and start with the trades you have already made, instead of knowing nothing about you until your first EVI trade. The files are read from your own <code>.runelite</code> folder, on this computer, and are never written to or sent anywhere. EVI matches them with its own FIFO matcher and its own tax model, exactly as it does its own trades.</p>
+<div class="controls"><button id="xlogScan">Look for log files</button><button id="xlogPreview" disabled>Preview what would be added</button><button id="xlogCommit" disabled>Add these trades</button><button id="xlogUndo" disabled>Undo this import</button></div>
+<div id="xlogFiles" class="scrollbox" style="max-height:160px;margin:8px 0"></div>
+<p id="xlogStatus" role="status" class="detail">Nothing is read until you ask, and nothing is added until you have seen the preview.</p>
+<div id="xlogResult"></div></section><script src="/exchange-log-import.js"></script>
+<section style="margin:24px" id="logImportPanel"><h2>Import other trade logs</h2><p>Import completed flips from CSV, TSV or XLSX. Files stay on this computer. The trade-history CSV import above is still available too. Export an EVI backup in Live RuneLite before a large import.</p><div class="controls">
+<label>File<input id="logFile" type="file" accept=".csv,.tsv,.xlsx"></label><label>Separator<select id="logDelimiter"><option value=",">Comma</option><option value=";">Semicolon</option><option value="&#9;">Tab</option></select></label><button id="logRead">Read file</button><label>Worksheet<select id="logSheet"></select></label>
+<label>Log source name<input id="logSource" placeholder="Use the same name for repeat imports"></label><label>Decimal separator<select id="logDecimal"><option value=".">Point</option><option value=",">Comma</option></select></label><label>Dates<select id="logDate"><option value="iso">ISO with timezone</option><option value="excel1900">Excel 1900</option><option value="excel1904">Excel 1904</option></select></label><label>Excel UTC offset (minutes)<input id="logOffset" type="number" value="0" min="-840" max="840"></label></div>
+<div class="controls" id="logMapping"></div><p><label><input type="checkbox" id="logTax"> My mapped profit or sale proceeds are after tax.</label></p><p><label><input type="checkbox" id="logOverlap"> These trades do not overlap another imported source or merged RuneLite flips.</label></p><button id="logPreview">Preview import</button><button id="logCommit" disabled>Add previewed trades</button><p id="logStatus" role="status"></p><p id="logWarnings"></p><table><thead><tr><th>Item</th><th>Cost GP</th><th>Net profit GP</th><th>Hold hours</th></tr></thead><tbody id="logRows"></tbody></table></section><script src="/import-ui.js"></script><section style="margin:24px"><h2>Suggestion preferences</h2><p>Save your preferences to shape EVI's score and the Suggested GE Slots panel: profit target filters out anything below your target expected profit after tax, and holding period biases the score toward items whose trading pace fits how long you want to hold. Existing 1h, 6h and overnight direction forecasts remain available above.</p><div class="controls"><label>Profit target after tax<select id="planProfit"><option value="0">Auto</option><option>20000</option><option>50000</option><option>100000</option><option>500000</option><option>1000000</option><option>2000000</option></select></label><label>Holding period<select id="planTime"><option value="5m">5 minutes</option><option value="1h">1 hour</option><option value="6h">6 hours</option><option value="12h">Overnight (12 hours)</option><option value="24h">1 day</option><option value="72h">3 days</option><option value="168h">7 days</option></select></label><button id="planSave">Save preferences</button></div><p id="planStatus" role="status"></p></section><script src="/preferences.js"></script><section style="margin:24px"><h2>Performance reports · Preview</h2><p>Results from individual completed trades, including saved RuneLite flips. Win rate counts profitable trades divided by all trades, including break-even. These are historical outcomes, not future profit forecasts. Separate sources may overlap: import only non-overlapping logs.</p><button id="performanceRefresh">Refresh performance report</button><p id="performanceStatus" role="status">Refresh to analyse local trade records.</p><h3>By item</h3><div class="tablewrap scrollbox"><table><thead><tr><th>Group</th><th>Trades</th><th>Net profit GP</th><th>Win rate</th><th>Losses</th><th>Break-even</th><th>Evidence</th></tr></thead><tbody id="performanceItems"></tbody></table></div><h3>By actual holding period</h3><div class="tablewrap scrollbox"><table><thead><tr><th>Group</th><th>Trades</th><th>Net profit GP</th><th>Win rate</th><th>Losses</th><th>Break-even</th><th>Evidence</th></tr></thead><tbody id="performancePeriods"></tbody></table></div></section><script src="/performance.js"></script></body>
+</html>

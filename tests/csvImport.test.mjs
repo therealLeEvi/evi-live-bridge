@@ -216,6 +216,50 @@ test('csv import: the parser\'s output is exactly what Store.importFlips accepts
   assert.equal(undone.removed, 3);
 });
 
+test('importFlips: the same trade cannot arrive twice by two different routes', t => {
+  // A fingerprint only catches a re-import through the same door. The private tool writes
+  // "copilot|item|times|..." and the CSV path writes 'generic:["csv <file>",...]', so the same trade
+  // arriving the other way has a fingerprint that can never match -- and would double-weight that item
+  // in every ranking afterwards, silently. Checked on novi's own data: their flips.csv happened not to
+  // overlap the earlier import (that one stops 12 Sept, the file starts the 18th), so nothing had gone
+  // wrong yet, but only by luck.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'evi-crossroute-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const store = new Store(dir);
+  const trade = {itemId: 565, item: 'Blood rune', quantity: 3411, capital: 1156329, profit: 13644,
+    firstBuy: 1789383383086, lastSell: 1789383710123, account: 'le evi'};
+
+  // Arrives first through the private tool's scheme.
+  assert.equal(store.importFlips({source: 'copilot', flips: [{...trade, fp: 'copilot|blood rune|a|b|3411|3411'}]}).accepted, 1);
+  // Then the very same trade through the CSV path, different source, different fingerprint entirely.
+  const second = store.importFlips({source: 'csv flips.csv', flips: [{...trade, fp: 'generic:["csv flips.csv","sig"]'}]});
+  assert.equal(second.accepted, 0, 'the content is already there, whatever describes it');
+  assert.equal(second.duplicates, 1);
+  assert.equal(store.state().importedFlips.length, 1);
+
+  // A file that simply lists the same trade twice is caught within the one request, which the
+  // fingerprint sets alone would not do -- they are only updated once the record is appended.
+  const twice = store.importFlips({source: 'csv other.csv', flips: [
+    {...trade, itemId: 453, item: 'Coal', fp: 'generic:["csv other.csv","x"]'},
+    {...trade, itemId: 453, item: 'Coal', fp: 'generic:["csv other.csv","y"]'},
+  ]});
+  assert.equal(twice.accepted, 1, 'one of the two, not both');
+  assert.equal(twice.duplicates, 1);
+
+  // What must still get through: a different account, a different quantity, a different time.
+  const distinct = store.importFlips({source: 'csv third.csv', flips: [
+    {...trade, account: 'alt', fp: 'g1'},
+    {...trade, quantity: 3410, fp: 'g2'},
+    {...trade, lastSell: trade.lastSell + 1000, fp: 'g3'},
+  ]});
+  assert.equal(distinct.accepted, 3, 'these are genuinely different trades and must not be swallowed');
+
+  // And removing an import takes its content keys with it, so the same file can be imported again.
+  store.importFlips({source: 'copilot', remove: true});
+  const readded = store.importFlips({source: 'copilot', flips: [{...trade, fp: 'copilot|blood rune|a|b|3411|3411'}]});
+  assert.equal(readded.accepted, 1, 'undoing an import must really undo it');
+});
+
 test('csv import: the parser is served to the browser, and only to an unlocked one', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'evi-csv-http-'));
   const port = 51764, app = createBridge({dir, port});

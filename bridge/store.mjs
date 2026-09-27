@@ -6,6 +6,14 @@ import {saleProceeds} from './tax.mjs';
 const states = new Set(['EMPTY','BUYING','SELLING','BOUGHT','SOLD','CANCELLED_BUY','CANCELLED_SELL']);
 const id = x => typeof x === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(x);
 const integer = (x, min=0, max=2147483647) => Number.isSafeInteger(x) && x >= min && x <= max;
+
+// Identifies an imported flip by what it IS rather than by which tool described it, so the same trade
+// cannot be imported twice through two routes with incompatible fingerprints. See the comment on
+// this.importedContent for how that was found. The account is part of the key because the same flip on
+// two accounts is two flips; the item name is not, because two tools may spell it differently while
+// meaning the same id.
+const importedContentKey = f =>
+  [f.itemId, (f.account ?? ''), f.quantity, f.profit, f.firstBuy, f.lastSell].join('|');
 export const finished = o => o && (['BOUGHT','SOLD','CANCELLED_BUY','CANCELLED_SELL'].includes(o.state) || (o.total > 0 && o.filled === o.total));
 
 // A "margin check": the one-item probe a flipper places at a deliberately bad price to find out what
@@ -239,7 +247,16 @@ export class Store {
     // Completed flips imported from another tracker (see importFlips): real trades EVI never
     // witnessed, kept separate from `flips` so they can inform ranking without being counted as
     // profit EVI observed.
-    this.importedFlips=[]; this.importedFingerprints=new Set();
+    // Two sets, because a fingerprint only catches a re-import through the SAME route. The private
+    // tool writes "copilot|item|times|..." and the CSV import writes 'generic:["csv <file>",...]', so
+    // the same trade arriving by the other door has a fingerprint that can never match and would be
+    // accepted as new -- double-weighting that item in every ranking afterwards, with nothing said.
+    // Found on 27 Sept while checking whether novi's own flips.csv overlapped their earlier import: it
+    // did not (that one stops at 12 Sept and the file starts on the 18th), so the collision was luck
+    // rather than design. The content key closes it: an item, an account, a quantity, a profit and both
+    // timestamps. Two genuinely separate flips of one item cannot share a start AND an end time on one
+    // account, so there is no realistic trade this wrongly refuses.
+    this.importedFlips=[]; this.importedFingerprints=new Set(); this.importedContent=new Set();
     this.linkedCount=0;
     if (fs.existsSync(this.file)) {
       const bytes=fs.readFileSync(this.file);
@@ -267,10 +284,11 @@ export class Store {
     if(r.type==='personal-use-undo') {this.personalUse.delete(this.resolve(r.buyId));return;}
     if(r.type==='personal-use-item') {this.personalUseItems.add(r.itemId);return;}
     if(r.type==='personal-use-item-undo') {this.personalUseItems.delete(r.itemId);return;}
-    if(r.type==='flips-imported') {for(const f of r.flips)if(!this.importedFingerprints.has(f.fp)){this.importedFingerprints.add(f.fp);this.importedFlips.push(f);}return;}
+    if(r.type==='flips-imported') {for(const f of r.flips)if(!this.importedFingerprints.has(f.fp)){this.importedFingerprints.add(f.fp);this.importedContent.add(importedContentKey(f));this.importedFlips.push(f);}return;}
     if(r.type==='flips-import-removed') {
       this.importedFlips=this.importedFlips.filter(f=>f.source!==r.source);
       this.importedFingerprints=new Set(this.importedFlips.map(f=>f.fp));
+      this.importedContent=new Set(this.importedFlips.map(importedContentKey));
       return;
     }
     // A purchase the player made while EVI was not watching (see recordPurchase). It joins the
@@ -543,16 +561,23 @@ export class Store {
       return {removed,total:this.importedFlips.length};
     }
     if(!Array.isArray(flips)||!flips.length||flips.length>500)throw Error('Import between 1 and 500 flips per request');
-    const clean=[];
+    const clean=[],batchContent=new Set();
     for(const f of flips) {
       if(!f||typeof f.fp!=='string'||!f.fp||f.fp.length>300)throw Error('Every imported flip needs a fingerprint');
       if(!integer(f.itemId,1)||typeof f.item!=='string'||!f.item||f.item.length>150)throw Error('Every imported flip needs a resolved itemId and name');
       if(!integer(f.quantity,1)||!Number.isSafeInteger(f.profit)||!integer(f.capital,0))throw Error('Invalid quantity, capital or profit');
       if(!integer(f.firstBuy,1,Number.MAX_SAFE_INTEGER)||!integer(f.lastSell,1,Number.MAX_SAFE_INTEGER))throw Error('Invalid trade timestamps');
-      if(this.importedFingerprints.has(f.fp))continue; // already imported
-      clean.push({fp:f.fp,source,itemId:f.itemId,item:f.item,quantity:f.quantity,capital:f.capital,
+      if(this.importedFingerprints.has(f.fp))continue; // already imported through this same route
+      const row={fp:f.fp,source,itemId:f.itemId,item:f.item,quantity:f.quantity,capital:f.capital,
         netProceeds:f.capital+f.profit,profit:f.profit,firstBuy:f.firstBuy,lastSell:f.lastSell,
-        hold:(f.lastSell-f.firstBuy)/3600000,account:typeof f.account==='string'?f.account.slice(0,80):null,imported:true});
+        hold:(f.lastSell-f.firstBuy)/3600000,account:typeof f.account==='string'?f.account.slice(0,80):null,imported:true};
+      // The same trade re-imported by a different route, whose fingerprint could never match (see the
+      // comment on importedContent). batchContent covers a file that simply lists a trade twice: the
+      // sets above are only updated when the record is appended, so without it both copies pass.
+      const content=importedContentKey(row);
+      if(this.importedContent.has(content)||batchContent.has(content))continue;
+      batchContent.add(content);
+      clean.push(row);
     }
     if(clean.length)this.append({type:'flips-imported',flips:clean});
     return {accepted:clean.length,duplicates:flips.length-clean.length,total:this.importedFlips.length};

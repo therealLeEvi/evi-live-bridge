@@ -1,0 +1,173 @@
+<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EVI Live setup</title>
+<style>
+:root{--ink:#2b2318;--paper:#efe6d0;--edge:#c9b896;--good:#2f6b34;--warn:#8a5a00;--bad:#8c2f2f}
+*{box-sizing:border-box}
+body{margin:0;padding:24px 16px 64px;background:var(--paper);color:var(--ink);
+  font:15px/1.55 "Segoe UI",system-ui,sans-serif}
+main{max-width:760px;margin:0 auto}
+h1{font-size:22px;margin:0 0 4px}
+h2{font-size:17px;margin:0 0 6px}
+p{margin:0 0 10px}
+.sub{color:#6a5c45;margin-bottom:22px}
+section{background:#f7f1e2;border:1px solid var(--edge);border-radius:6px;padding:16px 18px;margin-bottom:18px}
+button{font:inherit;padding:7px 14px;border:1px solid var(--edge);border-radius:4px;
+  background:#e3d7bb;color:var(--ink);cursor:pointer}
+button:hover:not(:disabled){background:#d8c9a6}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.note{font-size:13.5px;color:#6a5c45}
+.status{margin-top:10px;font-size:14px;white-space:pre-wrap}
+.ok{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+dl{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;margin:12px 0 0;font-size:13.5px}
+dt{color:#6a5c45}
+dd{margin:0;font-variant-numeric:tabular-nums}
+code{background:#e7ddc4;padding:1px 4px;border-radius:3px;font-size:13px}
+</style>
+<main>
+<h1>EVI Live setup</h1>
+<p class="sub">Everything here runs on this computer. Nothing on this page sends your trades anywhere.</p>
+
+<section>
+  <h2>Bring over the history you already have</h2>
+  <p>EVI gives better suggestions once it knows what you have traded before, and it does not need to
+  watch you for weeks to learn that. If you have run the <strong>Exchange Logger</strong> plugin, its
+  logs are already on this machine and EVI can read them.</p>
+  <p class="note">Your own history is an <em>extra</em> safety layer, never a requirement. EVI ranks
+  trades from the market on its own, and it does not hold back its better picks until you import
+  anything.</p>
+  <div class="row">
+    <button id="scan">Look for a log on this computer</button>
+    <button id="import" disabled>Import it</button>
+  </div>
+  <div class="status" id="logStatus"></div>
+  <dl id="summary" hidden></dl>
+  <p class="note" id="importNote" hidden>Nothing has been saved yet. Importing the same log twice adds
+  nothing: EVI recognises a trade it has already seen.</p>
+</section>
+
+<section>
+  <h2>Let EVI measure the market over time</h2>
+  <p>EVI keeps its own record of prices as the hours pass, on this computer only. It uses it to answer
+  two questions no single price can: <strong>can this price even be bought again</strong>, and
+  <strong>is anyone actually paying it</strong>. Those two checks are how EVI avoids offering you a
+  trade that cannot be finished.</p>
+  <p class="note">Without this, those checks have nothing to read and simply stay quiet. It fetches
+  public price data from the OSRS Wiki a few times an hour and writes it into your <code>data</code>
+  folder. It sends nothing about you.</p>
+  <div class="row">
+    <button id="archiveOn">Switch it on</button>
+    <button id="archiveOff">Switch it off</button>
+  </div>
+  <div class="status" id="archiveStatus">checking...</div>
+</section>
+
+<section>
+  <h2>Pairing RuneLite</h2>
+  <p>The plugin needs the <strong>RuneLite plugin key</strong>, which is printed in the bridge's own
+  window when it starts - not the scanner key you used to open this page. Paste it into EVI's sidebar
+  in the client.</p>
+  <p class="note">The plugin only ever talks to <code>127.0.0.1</code>. Your suggestions are computed
+  here, on this machine.</p>
+</section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const api = async (path, body) => {
+  const opts = body === undefined ? {}
+    : {method: 'POST', headers: {'Content-Type': 'application/json', 'X-EVI-UI': '1'}, body: JSON.stringify(body)};
+  const r = await fetch(path, opts);
+  const text = await r.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch (e) {}
+  if (!r.ok) throw new Error((data && data.error) || ('HTTP ' + r.status));
+  return data;
+};
+const num = n => Number.isFinite(n) ? Math.round(n).toLocaleString('en-GB') : '-';
+const day = ms => Number.isFinite(ms) ? new Date(ms).toLocaleDateString('en-GB') : '-';
+const say = (id, text, cls) => { const e = $(id); e.textContent = text; e.className = 'status ' + (cls || ''); };
+
+// ---- history import ----
+// The names of the log files found, kept because the import route reads only files it was named
+// (never a path from the page), and needs the same list again to do the real write.
+let logFiles = [];
+
+const showSummary = p => {
+  const rows = [
+    ['Finished flips', num(p.flips)],
+    ['Different items', num(p.items)],
+    ['Net profit', num(p.profit) + ' gp'],
+    ['Won / lost', num(p.winners) + ' / ' + num(p.losers)],
+    ['Covers', day(p.firstTrade) + ' to ' + day(p.lastTrade)],
+    ['Still held', num(p.stillHeld)],
+    ['Sales with no purchase behind them', num(p.unmatchedSales)],
+  ];
+  const dl = $('summary');
+  dl.textContent = '';
+  for (const row of rows) {
+    const dt = document.createElement('dt'); dt.textContent = row[0];
+    const dd = document.createElement('dd'); dd.textContent = row[1];
+    dl.appendChild(dt); dl.appendChild(dd);
+  }
+  dl.hidden = false;
+};
+
+$('scan').onclick = async () => {
+  $('scan').disabled = true; say('logStatus', 'Looking...');
+  $('summary').hidden = true; $('importNote').hidden = true;
+  try {
+    const found = await api('/api/exchange-log/scan');
+    logFiles = ((found && found.files) || []).map(f => f.name);
+    if (!logFiles.length) {
+      $('import').disabled = true;
+      say('logStatus', (found && found.installed)
+        ? 'The Exchange Logger folder is here but holds no log files yet.'
+        : 'No Exchange Logger log found on this computer. That is not a problem - EVI works without one.', 'warn');
+      return;
+    }
+    // Always previewed before anything is written. The route treats a request as a preview unless it
+    // is explicitly told otherwise, but this says so anyway rather than relying on that default.
+    const p = await api('/api/exchange-log/import', {files: logFiles, preview: true});
+    showSummary(p);
+    $('import').disabled = !(p.flips > 0);
+    $('importNote').hidden = !(p.flips > 0);
+    say('logStatus', p.flips
+      ? p.flips + ' finished flips read from ' + logFiles.length + ' log file(s).'
+      : 'A log was found but it holds no finished flips yet.', p.flips ? 'ok' : 'warn');
+  } catch (e) { say('logStatus', e.message, 'bad'); }
+  finally { $('scan').disabled = false; }
+};
+
+$('import').onclick = async () => {
+  $('import').disabled = true; say('logStatus', 'Importing...');
+  try {
+    const r = await api('/api/exchange-log/import', {files: logFiles, preview: false});
+    const added = (r && r.accepted) || 0, dupes = (r && r.duplicates) || 0;
+    say('logStatus', 'Imported ' + added + ' flips'
+      + (dupes ? ', and skipped ' + dupes + ' EVI had already seen' : '')
+      + '. EVI will use them for ranking from the next suggestion on.', 'ok');
+    $('importNote').hidden = true;
+  } catch (e) { say('logStatus', e.message, 'bad'); $('import').disabled = false; }
+};
+
+// ---- price archive ----
+const renderArchive = s => {
+  if (!s) { say('archiveStatus', 'Status unavailable.', 'warn'); return; }
+  const on = !!s.enabled;
+  const hours = Number(s.hoursStored) || 0;
+  say('archiveStatus',
+    (on ? 'On. ' : 'Off. ') + hours.toLocaleString('en-GB') + ' hours recorded so far.'
+    + (on && hours < 24 ? ' The two checks stay quiet until there is about a day of it.' : ''),
+    on ? 'ok' : 'warn');
+  $('archiveOn').disabled = on; $('archiveOff').disabled = !on;
+};
+const setArchive = async enabled => {
+  try { renderArchive(await api('/api/price-archive', {enabled: enabled, fiveMinute: {enabled: enabled}})); }
+  catch (e) { say('archiveStatus', e.message, 'bad'); }
+};
+$('archiveOn').onclick = () => setArchive(true);
+$('archiveOff').onclick = () => setArchive(false);
+(async () => { try { renderArchive(await api('/api/price-archive')); }
+  catch (e) { say('archiveStatus', e.message, 'bad'); } })();
+</script>

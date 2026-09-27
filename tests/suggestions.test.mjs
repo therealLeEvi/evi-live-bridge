@@ -473,7 +473,7 @@ test('market: a deeper margin can outrank a thinly-liquid one even with less raw
 
 test('market: maxSpend drops a candidate that cannot be afforded even at quantity 1', () => {
   const items = mapping([{id: 3, name: 'Confliction gauntlets', limit: 100}]);
-  const withGauntlets = prices({'3': {high: 20500000, low: 20000000}});
+  const withGauntlets = prices({'3': {high: 21500000, low: 20000000}});
   const vols = volumes({'3': {highPriceVolume: 10, lowPriceVolume: 10}});
   const blocklist = new Set([1, 2]);
   const unconstrained = computeMarketSuggestion(items, withGauntlets, vols, {blocklist});

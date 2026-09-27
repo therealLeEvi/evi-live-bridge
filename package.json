@@ -1,9 +1,12 @@
 {
   "name": "evi-live-bridge",
   "version": "3.6.0",
+  "license": "BSD-2-Clause",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "start": "node --use-system-ca bridge/server.mjs",
     "test": "node --test tests/*.test.mjs"

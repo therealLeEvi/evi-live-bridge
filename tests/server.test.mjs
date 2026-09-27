@@ -86,11 +86,17 @@ test('loopback bridge protects personal scanner, API, origins, keys and static p
   assert.equal((await get('/data/keys.json',{headers:{Cookie:cookie}})).status,404);
   assert.equal((await get('/api/market/anything?url=https://evil.example',{headers:{Cookie:cookie}})).status,404);
   // The browser scanner is optional: the bridge is published and usable on its own (the RuneLite
-  // plugin only needs the API), so an install without the scanner folder must answer with a plain
-  // "not installed" 404 rather than an error, while a full install serves the dashboard.
+  // plugin only needs the API). A full install serves the scanner's dashboard here; an install
+  // WITHOUT the scanner folder -- which is every install from this repository -- now serves the setup
+  // page instead of the 404 it used to answer with, because that page is how a player imports the
+  // history they already have and switches on the price record. Both are a 200, so the body is what
+  // distinguishes them.
   const html=await get('/',{headers:{Cookie:cookie}});
-  if(html.status===200)assert.ok((await html.text()).includes('Live RuneLite'));
-  else {assert.equal(html.status,404);assert.match((await html.json()).error,/scanner is not installed/);}
+  assert.equal(html.status,200);
+  const rootBody=await html.text();
+  const isScanner=rootBody.includes('Live RuneLite'), isSetup=rootBody.includes('EVI Live setup');
+  assert.ok(isScanner||isSetup,'/ serves the scanner when installed, otherwise the setup page');
+  if(isSetup)assert.ok(!rootBody.includes(app.secrets.scanner),'the setup page never carries a key');
   assert.equal(html.headers.get('access-control-allow-origin'),null);
   const crossSite=(pathname,extra={})=>new Promise((resolve,reject)=>{
     http.get(app.origin+pathname,{headers:{'Sec-Fetch-Site':'cross-site','Sec-Fetch-Mode':'navigate','Sec-Fetch-Dest':'document',Cookie:cookie,...extra}},r=>{

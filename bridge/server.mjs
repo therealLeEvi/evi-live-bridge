@@ -7,7 +7,7 @@ import {Store} from './store.mjs';
 import {createMarketCache} from './marketCache.mjs';
 import {createIconCache} from './icons.mjs';
 import {parseLog,buildOffers,flipsFrom,summarise,resolveLogFile} from './exchangeLog.mjs';
-import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
+import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_WARN_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
 import {estimateUnitTax} from './tax.mjs';
 import {createSuggestionLog,checksOf} from './suggestionLog.mjs';
 import {joinSuggestionOutcomes,summarizeOutcomes} from './suggestionOutcomes.mjs';
@@ -346,6 +346,11 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           const askedFor=Math.max(0,Number(url.searchParams.get('minProfit'))||0);
           const minProfitChosen=askedFor>0;
           const minProfit=minProfitChosen?askedFor:AUTO_MIN_PROFIT;
+          // An edge thinner than the item's own GE tax is not offered (see marginClearsTax in
+          // suggestions.mjs for the 335-hour measurement behind it). Per-item rather than flat: the
+          // bar is that item's own tax, and a tax-free item is exempt. MinProfitTier.NONE sends
+          // minProfit=1 meaning "no minimum at all", and switches this off with the floor.
+          const requireMarginOverTax=askedFor!==1;
           const blocklist=new Set((url.searchParams.get('blocklist')||'').split(',').map(s=>parseInt(s,10)).filter(Number.isFinite));
           // Session-only exclusions from the plugin, not a config setting: items already occupying
           // an active/uncollected GE slot (so the same item isn't suggested again right after you've
@@ -442,7 +447,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
               return {limit,remaining:limitAllowance({limit,used,windowEndsAt,targetDurationMinutes})};
             };
           }
-          const gates={membersBlocked,limitFor,focusBlocked};
+          const gates={membersBlocked,limitFor,focusBlocked,requireMarginOverTax};
           // How much of the cash stack one market-wide suggestion may commit, as a percentage
           // (EviLiveConfig.maxTradeShare, default 25). Only meaningful alongside a known cash stack,
           // and only applied to the market-wide tier -- a suggestion from the player's own history
@@ -557,13 +562,31 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
               // worth 64,559, twenty times less, and would never have cleared that minimum. So where
               // there IS a reading, the minimum is applied to it instead. Only when the player set one
               // themselves: with no minimum there is nothing to fail, and this stays a plain warning.
-              if(detail&&Number.isFinite(detail.netAtAverage)&&minProfitChosen) {
+              // Runs whether or not the player set a minimum. Until 27 Sept it was gated on
+              // minProfitChosen, so every player on the default AUTO tier -- which deliberately sends
+              // no minProfit at all -- had this skipped entirely, and got the quoted spread with only
+              // the 500 gp total floor behind it. That is how 25,000 blood runes were offered on a two
+              // gp edge. With no minimum set the bar is the Auto floor, plus the same
+              // margin-must-cover-tax test the tiers apply, measured here at the price buyers are
+              // really paying rather than the quoted one.
+              if(detail&&Number.isFinite(detail.netAtAverage)) {
                 const qty=candidate.quantity||1;
                 const supportedTotal=detail.netAtAverage*qty;
+                const taxAtSupport=estimateUnitTax(candidate.itemId,detail.averagePaid);
+                // The warning bar, one times tax, not the tighter bar the tiers drop on.
+                const thinAtSupport=requireMarginOverTax&&!marginClearsTax(detail.netAtAverage,taxAtSupport,MARGIN_TAX_WARN_MULTIPLE);
+                if(thinAtSupport&&supportedTotal>=minProfit) {
+                  const gp=n=>Math.round(n).toLocaleString("en-US");
+                  return {warning:"Warning: at the price buyers are actually paying this makes about "
+                      +gp(detail.netAtAverage)+" gp a unit, less than the "+gp(taxAtSupport)
+                      +" gp tax on each one. An edge thinner than its own tax does not survive a single"
+                      +" price step -- measured over 335 hours, trades like this lose GP a third of the time.",
+                    detail:{...detail,thinnerThanTax:true}};
+                }
                 if(supportedTotal<minProfit) {
                   const quoted=Math.round((candidate.sellPrice-estimateUnitTax(candidate.itemId,candidate.sellPrice)-candidate.buyPrice)*qty);
                   const gp=n=>Math.round(n).toLocaleString("en-US");
-                  return {warning:"Warning: below your "+gp(minProfit)+" gp minimum at the price buyers are actually paying. "
+                  return {warning:"Warning: "+(minProfitChosen?"below your "+gp(minProfit)+" gp minimum":"worth under "+gp(minProfit)+" gp")+" at the price buyers are actually paying. "
                       +"The quoted spread makes this look like "+gp(quoted)+" gp, but over the last "+detail.hours
                       +" hours "+detail.units+" buyers paid an average of "+gp(detail.averagePaid)
                       +" gp, which makes it about "+gp(supportedTotal)+" gp.",
@@ -1267,12 +1290,26 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
         catch(e){return send(502,{error:e.message});}
       }
       const files={'/':'EVI_Flip_Scanner_V3.html','/live.js':'live.js','/performance.js':'performance.js','/performance-core.mjs':'performance-core.mjs','/preferences.js':'preferences.js','/lookup.js':'lookup.js','/import-ui.js':'import-ui.js','/exchange-log-import.js':'exchange-log-import.js','/import-core.mjs':'import-core.mjs','/import-worker.mjs':'import-worker.mjs','/workbook-import.mjs':'workbook-import.mjs','/vendor/xlsx.mjs':'vendor/xlsx.mjs'};
+      // Setup, and the only page that ships WITH the bridge rather than with the browser scanner.
+      // The scanner is not part of the published bridge, which left a plugin-only user with no way to
+      // do two things that are not optional extras: import the trade history they already have (the
+      // Exchange Logger importer had routes but no interface), and switch on the price archive, which
+      // is off until something asks for it -- so the fill-history and sell-support checks had nothing
+      // to read and silently stayed quiet for every Hub user. A player's own history is meant to be an
+      // extra safety layer, never a prerequisite, and it cannot be either if there is no way to hand
+      // it over. See the 2026-09-27 README entry.
+      const setupPage=()=>send(200,fs.readFileSync(path.join(root,'bridge','setup.html'),'utf8'),'text/html');
+      if(pathname==='/setup')return setupPage();
       if(files[pathname]) {
         // The browser scanner is optional: the bridge is useful on its own (the RuneLite plugin
-        // talks to the API above). Say so plainly instead of failing with a stack trace when the
-        // scanner folder isn't installed alongside it.
+        // talks to the API above). Fall back to the setup page rather than a bare 404 when the
+        // scanner folder isn't installed alongside it -- that is the normal case for anyone who
+        // installed the bridge from its own repository or from a packaged bundle.
         try {return send(200,fs.readFileSync(path.join(root,'scanner',files[pathname]),'utf8'),pathname==='/'?'text/html':'text/javascript');}
-        catch {return send(404,{error:'The browser scanner is not installed next to this bridge. The RuneLite plugin works without it.'});}
+        catch {
+          if(pathname==='/')return setupPage();
+          return send(404,{error:'The browser scanner is not installed next to this bridge. The RuneLite plugin works without it.'});
+        }
       }
       return send(404,{error:'Not found'});
     } catch(e) {if(!res.headersSent)send(400,{error:e.message});else res.end();}

@@ -322,6 +322,11 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
     const tax = estimateUnitTax(h.itemId, p.high);
     const net = p.high - p.low - tax;
     if (net <= 0) continue;
+    // An edge that does not cover this item's own tax, however good the track record (see
+    // marginClearsTax). Applies here too: a history of winning on an item does not make a two gp
+    // margin on it survive a one gp tick.
+    if (options.requireMarginOverTax !== false
+        && !marginClearsTax(net, tax, options.marginTaxMultiple ?? MARGIN_TAX_MULTIPLE)) continue;
     let quantity = Math.max(1, Math.round(h.medianQty));
     let cashLimited = false;
     if (maxSpend !== undefined) {
@@ -782,6 +787,11 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     const tax = estimateUnitTax(item.id, p.high);
     const net = p.high - p.low - tax;
     if (net <= 0) continue;
+    // The tier a player with no history gets, and the one that suggested the blood runes: an edge
+    // thinner than the item's own tax is not offered at all (see marginClearsTax). Held to the
+    // stricter no-history bar -- there is no track record here to earn the benefit of the doubt.
+    if (options.requireMarginOverTax !== false
+        && !marginClearsTax(net, tax, options.marginTaxMultiple ?? MARGIN_TAX_NO_HISTORY_MULTIPLE)) continue;
     // The item's own GE buy limit when known (see DEFAULT_MARKET_QUANTITY_CAP above), else the cap.
     const limitKnown = Number.isFinite(item.limit) && item.limit > 0;
     // One limit per four-hour window the player's duration spans (see limitAllowance); the account's
@@ -892,6 +902,11 @@ export function computePushedSuggestion(candidates, options = {}) {
       && Number.isFinite(c.buy) && c.buy > 0 && Number.isFinite(c.sell) && c.sell > 0 && Number.isFinite(c.net) && c.net > 0)
     .sort((a, b) => (b.score || 0) - (a.score || 0));
   for (const c of ranked) {
+    // The scanner ranks on far more than current margin, but it cannot rank away the tax: an edge
+    // thinner than this item's own tax is dropped here too (see marginClearsTax).
+    if (options.requireMarginOverTax !== false
+        && !marginClearsTax(c.net, estimateUnitTax(c.itemId, c.sell),
+             options.marginTaxMultiple ?? MARGIN_TAX_NO_HISTORY_MULTIPLE)) continue;
     let quantity = Math.max(1, Math.round(Number.isFinite(c.qty) && c.qty > 0 ? c.qty : 1));
     // The same cap on how much of an item's hourly trading one order may be that the other two tiers
     // apply (see volumeShareForDuration). A scanner-pushed pick carries the scanner's own quantity,
@@ -1058,6 +1073,68 @@ export function estimateVolatility(series, n = 24) {
 // completes. This can never prove a trade WILL be profitable, only that its margin isn't already
 // sitting inside the item's own noise floor.
 export const MARGIN_CUSHION_MULTIPLIER = 1;
+
+// How much of an item's own Grand Exchange tax its after-tax margin must cover before EVI will offer
+// the trade. Added 27 Sept 2026 after a first user was suggested 25,000 blood runes -- the full buy
+// limit, 8.35m of capital -- on a spread that cleared tax by about two gp a unit, and lost GP as soon
+// as the price ticked. The 500 gp Auto floor could not catch it: it is a floor on the TOTAL predicted
+// profit, so a 25,000-unit order satisfies it with 0.02 gp a unit, and quantity launders an edge
+// smaller than one price step into a five-figure "predicted profit".
+//
+// Measured over 335 archived hours (tools/edge-vs-tax.mjs), selling at the median price available in
+// the following 12 hours rather than the single best print:
+//
+//   band                 candidates   median return   lower quartile   loses GP
+//   tax-free                 48,577          11.11%            2.78%         7%
+//   net under 0.5x tax       68,010           0.42%           -0.30%        33%
+//   0.5x to 1x tax           43,946           1.40%            0.32%        20%
+//   1x to 2x tax             56,839           2.65%            1.07%        15%
+//   2x to 5x tax             76,055           5.94%            2.91%        12%
+//   5x or more              125,816          26.60%           11.61%        10%
+//
+// Monotone across every band, and it picks the line out by itself: below half the tax the LOWER
+// QUARTILE is negative, meaning an ordinary bad draw loses GP, and a third of those trades do. At half
+// to one times tax the quartile is positive again and the loss rate is 20%. So there are two bars
+// rather than one:
+//
+//   * below 0.5x tax the candidate is not offered. That is where a normal bad case loses GP, and it
+//     drops 16% of offerable candidates -- close to the 8% the 500 gp Auto floor cost, nowhere near
+//     the 71% a flat percentage-of-stack would have. The blood runes sit at 0.33x.
+//   * below 1x tax it is offered with a warning (see server.mjs). Requiring 1x outright was measured
+//     and rejected as too strict: it would have dropped 27% of candidates, and among them real trades
+//     of novi's own -- the Eclipse Moon chestplate flip sits at 0.83x and made 1.78m on 1.65m.
+//
+// Dropping the clear losers and warning on the merely thin is the standing warn-don't-block rule here.
+//
+// This is deliberately NOT a flat cutoff, which is a standing rule here. The bar is the item's own
+// tax, so it scales with that item's own price, and a tax-free item (anything the GE charges no tax
+// on, which is where a small stack's thin-margin high-volume flipping lives) is exempt by
+// construction -- that band is also the safest one measured, at a 7% loss rate. MinProfitTier.NONE
+// still switches it off entirely, the same escape hatch the Auto floor has.
+// The bar for a tier that has the player's own track record on the item behind it. Half the tax is
+// where the measured lower quartile turns positive, so an ordinary bad draw no longer loses GP.
+export const MARGIN_TAX_MULTIPLE = 0.5;
+
+// The bar for a tier with NO track record -- the market-wide and scanner-pushed tiers, which is what
+// every new player gets and where a first impression is made. The full tax, because the measurement
+// above is drawn from exactly that population: every item, every hour, no history involved. It takes
+// the loss rate from 20% to 15%, and on live prices it drops 16% of offerable candidates against the
+// 0.5x bar's 10%. The looser bar is reserved for the personal tier because a real track record on the
+// item is evidence the whole-catalogue measurement cannot see.
+export const MARGIN_TAX_NO_HISTORY_MULTIPLE = 1;
+
+// The looser bar, used for a warning rather than a drop (see server.mjs).
+export const MARGIN_TAX_WARN_MULTIPLE = 1;
+
+// Pure decision. net: the predicted per-unit margin after tax. tax: the per-unit tax already
+// subtracted from it. Unknown or non-finite inputs never block a candidate, and neither does a
+// tax-free item -- there is nothing for its margin to clear. Can never prove a trade will be
+// profitable, only that its edge is not smaller than the tax it has to pay.
+export function marginClearsTax(net, tax, multiple = MARGIN_TAX_MULTIPLE) {
+  if (!Number.isFinite(net) || !Number.isFinite(tax)) return true;
+  if (!(tax > 0)) return true;
+  return net >= tax * multiple;
+}
 
 // Pure decision. marginPerUnit: predicted buy/sell margin per unit, after tax. price: the current
 // sell price, used to turn volEstimate's fraction into a gp figure comparable to marginPerUnit.

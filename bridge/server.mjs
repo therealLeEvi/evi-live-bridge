@@ -43,8 +43,8 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const same=(a,b)=>typeof a==='string'&&a.length===b.length&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const login=`<!doctype html><meta charset="utf-8"><title>EVI Live · Unlock</title>
 <style>body{background:#0b0f14;color:#eef4fb;font:18px system-ui;max-width:650px;margin:12vh auto;padding:24px}input,button{font:inherit;padding:12px;margin:8px 0}input{width:95%}</style>
-<h1>EVI Live</h1><p>Paste the Scanner key shown in the bridge window. Your trade data stays on this computer.</p>
-<form id="f"><label>Scanner key<input id="token" type="password" required autocomplete="off"></label><button>Open scanner</button></form><p id="status"></p>
+<h1>EVI Live</h1><p>Paste the key labelled <b>Scanner key</b> in the bridge window, not the RuneLite plugin key below it &mdash; both look alike. It opens EVI's setup and history import. Your trade data stays on this computer.</p>
+<form id="f"><label>Scanner key<input id="token" type="password" required autocomplete="off"></label><button>Unlock</button></form><p id="status"></p>
 <script>document.getElementById('f').onsubmit=async e=>{e.preventDefault();try{const r=await fetch('/api/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:document.getElementById('token').value.trim()})});if(!r.ok)throw Error('Key not accepted');location.replace('/')}catch(e){document.getElementById('status').textContent=e.message}};</script>`;
 
 export function createBridge({dir=path.join(root,'data'),port=51743}={}) {

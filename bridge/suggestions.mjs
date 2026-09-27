@@ -397,7 +397,7 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
   if (stackLimited) notes.push(`reduced so this one trade commits at most `+Math.round(options.maxStackShare*100)+`% of your cash stack`);
   if (shareLimited) notes.push(`reduced to `+Math.round(personalShareUsed*100)+`% of this item's recent hourly trading, so the order isn't larger than the market absorbs`);
   if (durationLimited) notes.push(`reduced to fit an estimated ~${targetDurationMinutes}-minute trade`);
-  if (limitLimited) notes.push('reduced to what EVI has seen left of this item\'s GE buy limit over your trade window (it resets every 4 hours)');
+  if (limitLimited) notes.push('reduced to what EVI has seen left of this item\'s GE buy limit, which is all that can fill before the limit resets in 4 hours -- a bigger offer would sit part-filled until then');
   if (ageMinutes !== null && ageMinutes > MAX_PRICE_AGE_MINUTES)
     notes.push(`note that one side of this item's price is about ${Math.round(ageMinutes / 60)} hour(s) old, so the current spread may not be real`);
   return {
@@ -865,7 +865,7 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     : `capped at ${fullSize.toLocaleString('en-US')} because this item's GE buy limit is unknown`);
   if (cashLimited) notes.push('capped to what your current cash stack can afford');
   if (durationLimited) notes.push(`capped to fit an estimated ~${targetDurationMinutes}-minute trade`);
-  if (limitLimited) notes.push('capped to what EVI has seen left of this item\'s GE buy limit over your trade window (it resets every 4 hours)');
+  if (limitLimited) notes.push('capped to what EVI has seen left of this item\'s GE buy limit, which is all that can fill before the limit resets in 4 hours -- a bigger offer would sit part-filled until then');
   if (stackLimited) notes.push(`capped so this one trade commits at most `+Math.round(options.maxStackShare*100)+`% of your cash stack`);
   if (shareLimited) notes.push(`capped to ${Math.round(maxVolumeShare * 100)}% of this item's recent hourly trading, so the order isn't larger than the market absorbs`+(maxVolumeShare > DEFAULT_MAX_VOLUME_SHARE ? ` over your ${targetDurationMinutes >= 120 ? Math.round(targetDurationMinutes / 60) + '-hour' : targetDurationMinutes + '-minute'} trade window` : ''));
   return {
@@ -938,7 +938,7 @@ export function computePushedSuggestion(candidates, options = {}) {
     const name = typeof c.name === 'string' && c.name ? c.name : `item ${c.itemId}`;
     const notes = [];
     if (cashLimited) notes.push('reduced to what your current cash stack can afford');
-    if (limitLimited) notes.push('reduced to what EVI has seen left of this item\'s GE buy limit over your trade window (it resets every 4 hours)');
+    if (limitLimited) notes.push('reduced to what EVI has seen left of this item\'s GE buy limit, which is all that can fill before the limit resets in 4 hours -- a bigger offer would sit part-filled until then');
     if (shareLimited) notes.push(`reduced to ${Math.round(pushedShare * 100)}% of this item's recent hourly trading`);
     return {
       itemId: c.itemId,
@@ -1333,6 +1333,18 @@ export async function pickWithForecast({rank, forecastFor, policy, horizon, cush
     // since an outlier sell price inflates exactly the margin the ranking rewards.
     if (supportFor) {
       const support = await supportFor(candidate);
+      // Held back rather than demoted. A demoted pick is still shown when nothing better passes, which
+      // is right for "this looks weak" but wrong for "this is worth less than its own tax at the price
+      // buyers are really paying" -- that is how 172,266 blood runes reached the sidebar on 27 Sept at a
+      // supported margin of 1 gp against a 6 gp tax. Quantity had turned it into a 172k total, which
+      // clears any floor, and the demotion only labelled it.
+      if (support && support.blocked) {
+        candidate.reasoning = `${support.warning || ''} ${candidate.reasoning || ''}`.trim();
+        candidate.sellSupport = support.detail;
+        blocked.push(candidate);
+        blocklist.add(candidate.itemId);
+        continue;
+      }
       if (support && support.warning) {
         candidate.reasoning = `${support.warning} ${candidate.reasoning || ''}`;
         candidate.sellSupport = support.detail;

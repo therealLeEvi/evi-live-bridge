@@ -1012,11 +1012,13 @@ test('buy limit: quantity is reduced to what is left of the 4-hour limit, and an
   const limitFor = id => id === 1 ? {limit: 10000, remaining: 250} : null;
   const m = computeMarketSuggestion(mapping(), fresh(), volumes(), {limitFor, blocklist: new Set([2]), maxVolumeShare: 0});
   assert.equal(m.quantity, 250);
-  assert.match(m.reasoning, /left of this item's GE buy limit over your trade window/);
+  // The wording changed with the sizing: this is one window's remainder, which is what can actually be
+  // placed, rather than the whole allowance across every window a long trade spans.
+  assert.match(m.reasoning, /all that can fill before the limit resets in 4 hours/);
   const tighter = id => id === 1 ? {limit: 10000, remaining: 100} : null; // below the usual size of 150
   const p = computeSuggestion(proven(), fresh(), Date.now(), {limitFor: tighter});
   assert.equal(p.quantity, 100);
-  assert.match(p.reasoning, /left of this item's GE buy limit over your trade window/);
+  assert.match(p.reasoning, /all that can fill before the limit resets in 4 hours/);
   const used = id => ({limit: 10000, remaining: 0});
   assert.equal(computeMarketSuggestion(mapping(), fresh(), volumes(), {limitFor: used, blocklist: new Set([2]), maxVolumeShare: 0}), null);
   assert.equal(computeSuggestion(proven(), fresh(), Date.now(), {limitFor: used}), null);

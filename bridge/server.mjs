@@ -7,7 +7,7 @@ import {Store} from './store.mjs';
 import {createMarketCache} from './marketCache.mjs';
 import {createIconCache} from './icons.mjs';
 import {parseLog,buildOffers,flipsFrom,summarise,resolveLogFile} from './exchangeLog.mjs';
-import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_WARN_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
+import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_MULTIPLE,MARGIN_TAX_NO_HISTORY_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
 import {estimateUnitTax} from './tax.mjs';
 import {createSuggestionLog,checksOf} from './suggestionLog.mjs';
 import {joinSuggestionOutcomes,summarizeOutcomes} from './suggestionOutcomes.mjs';
@@ -468,9 +468,25 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
               const limit=index.get(itemId)?.limit;
               if(!Number.isFinite(limit)||limit<=0)return null; // unknown limit: no constraint
               const {used,windowEndsAt}=store.buyLimitUsage(account,itemId);
-              // Across the player's own trade duration, not just the window running now: a 12-hour
-              // trade spans three buy-limit windows (see limitAllowance).
-              return {limit,remaining:limitAllowance({limit,used,windowEndsAt,targetDurationMinutes})};
+              // What can FILL right now, which is one window's remainder and nothing more. It used to be
+              // the whole allowance across every window the player's trade duration spans, and on a
+              // 2-day pace that is twelve of them: on 27 Sept EVI asked for 172,266 blood runes, 6.9x a
+              // single 25,000 limit.
+              //
+              // To be accurate about the mechanism, since an earlier version of this comment was not:
+              // the Grand Exchange does NOT refuse such an offer. It accepts it and fills up to the
+              // limit, then stalls until the four-hour window rolls over, then carries on. So the order
+              // is placeable and will eventually complete -- novi's own correction, and it is the reason
+              // this cap is a judgement rather than a correctness fix.
+              //
+              // The judgement: a quantity a player reads as "buy this now" should be the part that can
+              // actually fill now. The multi-window version commits the capital (57m in that example) to
+              // one slot for two days, grinding in limit-sized steps, and the fill estimate knows
+              // nothing about those stalls so it reports a time that cannot happen. The remainder is
+              // still reachable -- the wording says the limit resets every four hours -- and anyone who
+              // wants the single set-and-forget order can still place a larger one by hand.
+              const acrossWindows=limitAllowance({limit,used,windowEndsAt,targetDurationMinutes});
+              return {limit,remaining:Math.max(0,limit-(Number.isFinite(used)?used:0)),acrossWindows};
             };
           }
           const gates={membersBlocked,limitFor,focusBlocked,requireMarginOverTax};
@@ -599,13 +615,23 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
                 const supportedTotal=detail.netAtAverage*qty;
                 const taxAtSupport=estimateUnitTax(candidate.itemId,detail.averagePaid);
                 // The warning bar, one times tax, not the tighter bar the tiers drop on.
-                const thinAtSupport=requireMarginOverTax&&!marginClearsTax(detail.netAtAverage,taxAtSupport,MARGIN_TAX_WARN_MULTIPLE);
-                if(thinAtSupport&&supportedTotal>=minProfit) {
+                // The same bar the tiers apply to the QUOTED margin, applied to the margin that is
+                // actually true. On 27 Sept blood runes were offered at a quoted 7 gp against a 6 gp
+                // tax -- 1.17x, so the tier let them through -- while 10.4m units had changed hands at
+                // 339 over 12 hours, making the real edge 1 gp, or 0.17x the tax. That is the band
+                // measured at a 33% loss rate with a negative lower quartile, and 172,266 units turned
+                // it into a 172k "profit" that cleared every floor. Held BACK rather than demoted:
+                // a demoted pick is still shown when nothing better passes, and this one was.
+                const bar=candidate.source==='personal'?MARGIN_TAX_MULTIPLE:MARGIN_TAX_NO_HISTORY_MULTIPLE;
+                const thinAtSupport=requireMarginOverTax&&!marginClearsTax(detail.netAtAverage,taxAtSupport,bar);
+                if(thinAtSupport) {
                   const gp=n=>Math.round(n).toLocaleString("en-US");
-                  return {warning:"Warning: at the price buyers are actually paying this makes about "
-                      +gp(detail.netAtAverage)+" gp a unit, less than the "+gp(taxAtSupport)
+                  return {blocked:true,
+                    warning:"Set aside: at the price buyers are actually paying this makes about "
+                      +gp(detail.netAtAverage)+" gp a unit, against the "+gp(taxAtSupport)
                       +" gp tax on each one. An edge thinner than its own tax does not survive a single"
-                      +" price step -- measured over 335 hours, trades like this lose GP a third of the time.",
+                      +" price step -- measured over 335 hours, trades like this lose GP a third of the time,"
+                      +" however large the quantity makes the total look.",
                     detail:{...detail,thinnerThanTax:true}};
                 }
                 if(supportedTotal<minProfit) {

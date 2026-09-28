@@ -7,7 +7,7 @@ import {Store} from './store.mjs';
 import {createMarketCache} from './marketCache.mjs';
 import {createIconCache} from './icons.mjs';
 import {parseLog,buildOffers,flipsFrom,summarise,resolveLogFile} from './exchangeLog.mjs';
-import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,holdingPreempts,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_MULTIPLE,MARGIN_TAX_NO_HISTORY_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
+import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,holdingPreempts,hasLiveSellOffer,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_MULTIPLE,MARGIN_TAX_NO_HISTORY_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
 import {estimateUnitTax} from './tax.mjs';
 import {createSuggestionLog,checksOf} from './suggestionLog.mjs';
 import {joinSuggestionOutcomes,summarizeOutcomes} from './suggestionOutcomes.mjs';
@@ -715,12 +715,9 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // it had been standing at 1,856 since 05:14. Lower than their ask, for something already on
           // the market. relist.mjs is what speaks about an offer that is not moving; this tier is only
           // for stock sitting in the bag with no offer behind it.
-          const listedForSale=itemId=>{
-            if(!Number.isFinite(itemId)||!account)return false;
-            for(const o of store.offers.values())
-              if(o.itemId===itemId&&o.state==='SELLING'&&o.account===account)return true;
-            return false;
-          };
+          // Only an offer the plugin is still refreshing counts as being on the market -- see
+          // hasLiveSellOffer for the 30-ghosts-to-2-live measurement behind the window.
+          const listedForSale=itemId=>hasLiveSellOffer(store.offers.values(),itemId,account);
           const holdingOf=(...args)=>{
             const s=computeHoldingSuggestion(...args);
             if(!s)return null;

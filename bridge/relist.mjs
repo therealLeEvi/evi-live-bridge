@@ -110,6 +110,10 @@ export function relistAdvice({offers, prices, costBasis = new Map(), targetDurat
       message = `${head} The market is now BELOW your break-even of ${breakEven.toLocaleString('en-US')} gp after tax, so relisting at the market would lock in a loss. Holding for a recovery or cutting it is your call -- EVI won't choose for you.`;
     }
     out.push({itemId: offer.itemId, name: offer.name, message, offerPrice: offer.price, marketPrice: market,
+      // Below break-even is the one the player can lose GP on, so it is the one that reads as a warning.
+      level: breakEven !== null && market < breakEven ? 'warn' : 'caution',
+      label: pastTheClock ? 'Not selling' : 'Market moved away',
+      figures: `${offer.price.toLocaleString('en-US')} asked \u00b7 ${market.toLocaleString('en-US')} market`,
       breakEven, suggestedPrice, openMinutes: Math.round(openMinutes), belowBreakEven: breakEven !== null && market < breakEven});
   }
   return out;

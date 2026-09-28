@@ -54,7 +54,14 @@ export function sellAdvice({offers, costBasis = new Map()} = {}) {
     const name = offer.name || ('item ' + offer.itemId);
     const scope = remaining === null ? '' : ` on the ${gp(remaining)} still unsold`;
     out.push({
+      // Drawn as a card by the sidebar (see EviLivePanel.renderAdvice); the sentence stays as the
+      // tooltip and as what the scanner shows.
+      level: 'warn',
+      label: 'Below break-even',
+      figures: `${gp(offer.price)} asked \u00b7 break-even ${gp(breakEven)}`,
       itemId: offer.itemId,
+      // Carried as a field, not only inside the sentence: the sidebar draws it as the card title.
+      name,
       breakEven,
       lossEach: Math.round(lossEach),
       lossTotal: Math.round(lossEach * units),

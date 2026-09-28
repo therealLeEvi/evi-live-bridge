@@ -13,6 +13,7 @@ Base URL: `http://127.0.0.1:51743`. No LAN binding, CORS, arbitrary upstream URL
 | `GET /api/market/mapping`, `/latest`, `/5m`, `/1h` | Cookie | Fixed public price API proxy; all paths start `/api/market/` |
 | `GET /api/market/timeseries?id=4151&timestep=1h` | Cookie | Fixed public item time series |
 | `GET /api/news` | Cookie | Official OSRS RSS |
+| `GET /api/robust-prices` | Cookie | `{ "hours": 24, "prices": { "<itemId>": { "high", "low" } } }` -- each item's **median** buy and sell over the last 24 archived hours, from the local price record. The steady view the suggestion engine ranks on, served so the scanner can show what a row is really worth instead of what its last two trade prints imply. Empty `prices` when the price record is off or too new, which callers must treat as "no reading" and fall back to the live spread. |
 
 Example event body (the real plugin sends eight unique slots while logged in):
 

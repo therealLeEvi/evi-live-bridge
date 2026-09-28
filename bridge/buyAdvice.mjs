@@ -45,6 +45,7 @@ export function buyMarginAdvice({offers, prices, now = Date.now()}) {
       : ` Nothing has filled yet, so cancelling costs nothing.`;
     if (!p || !(p.sellPrice > 0)) {
       if (p && p.buyPrice > 0) out.push({itemId: offer.itemId, name, marginPerUnit: null, netAtMarket: null,
+        level: 'caution', label: 'Nobody selling', figures: `${gp(remaining)} still buying at ${gp(offer.price)}`,
         message: `${name}: nobody is selling to buyers at the moment, so EVI cannot price an exit for the ${gp(remaining)} you are still buying at ${gp(offer.price)} gp.${bought} EVI has no view on whether that changes.`});
       continue;
     }
@@ -52,6 +53,9 @@ export function buyMarginAdvice({offers, prices, now = Date.now()}) {
     const marginPerUnit = netAtMarket - offer.price;
     if (marginPerUnit > offer.price * MIN_MARGIN_SHARE) continue;
     out.push({itemId: offer.itemId, name, marginPerUnit, netAtMarket,
+      level: marginPerUnit < 0 ? 'warn' : 'caution',
+      label: 'Margin gone',
+      figures: `${gp(offer.price)} paid \u00b7 ${gp(netAtMarket)} after tax`,
       message: `${name}: your buy at ${gp(offer.price)} gp no longer has a margin -- buyers are paying ${gp(p.sellPrice)} gp, which is ${gp(netAtMarket)} gp after tax, ${marginPerUnit < 0 ? `${gp(-marginPerUnit)} gp BELOW` : `only ${gp(marginPerUnit)} gp above`} what you are paying.${bought} Whether to keep it is your call -- EVI never cancels anything, and it has no view on where the price goes next.`});
   }
   return out;

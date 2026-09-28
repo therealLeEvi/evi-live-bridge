@@ -1103,7 +1103,7 @@ test("sizing: how much of an hour's trading one order may be depends on how long
   assert.equal(volumeShareForDuration(30), 0.10);
   assert.equal(volumeShareForDuration(5 * 60), 0.10, 'under six hours keeps the tight cap');
   assert.equal(volumeShareForDuration(6 * 60), 0.25);
-  assert.equal(volumeShareForDuration(12 * 60), 0.50, 'the one measured point, unchanged');
+  assert.equal(volumeShareForDuration(12 * 60), 1.00, 'raised 28 Sept 2026 on two measurements that agree');
   assert.equal(volumeShareForDuration(0), 0.10);
 
   // Past twelve hours it now continues instead of stopping. It used to return 0.50 for any longer
@@ -1112,8 +1112,20 @@ test("sizing: how much of an hour's trading one order may be depends on how long
   // that left the market-wide tier with nothing to suggest at all against a 1m minimum, since every
   // liquid item was sized to a handful of units. 0.25 at six hours and 0.50 at twelve are both exactly
   // hours/24, so this is the same rule continued, not a new one.
-  assert.equal(volumeShareForDuration(24 * 60), 1.00, 'a full day may be twice a twelve-hour order');
-  assert.equal(volumeShareForDuration(48 * 60), 2.00, "Slow's two days");
+  // The ladder climbs at twice the old rate and STOPS at 2x an hour's volume. Changed 28 Sept 2026:
+  // the old rule came from fill-by-size.mjs, whose finding was narrower than it read -- orders up to
+  // half an hour's volume filled as often as small ones, and there was almost nothing above that line
+  // to judge, because 52 of the 61 largest orders were cancelled within minutes. An observation
+  // ceiling, not a measured cliff. tools/copilot-fill-sizes.mjs supplied the missing half from 392 of
+  // this account's own COMPLETED Copilot flips, 59% of which were larger than the old cap allowed:
+  // median profit runs 34,510 at or under 0.5x and 122,167 from 0.5x to 2x, then flattens while hold
+  // time keeps climbing. tools/market-tier-ranking.mjs agreed on outcomes rather than survivors --
+  // at twelve hours the wider cap held the median return at 5.56% and raised total profit 33%, while
+  // doubling again was clearly worse, and widening the already-2x two-day pace took the loss rate
+  // from 8% to 14%. So 2x is where the evidence stops and the cap stops there too.
+  assert.equal(volumeShareForDuration(24 * 60), 2.00, 'a full day reaches the ceiling');
+  assert.equal(volumeShareForDuration(48 * 60), 2.00, "Slow's two days, unchanged from before");
+  assert.equal(volumeShareForDuration(30 * 24 * 60), 2.00, 'and never past it, however long the wait');
   // Everything at or below twelve hours is untouched: making a short trade more permissive would be
   // extrapolating the risky way with nothing behind it.
   assert.equal(volumeShareForDuration(11 * 60), 0.25);
@@ -1121,13 +1133,13 @@ test("sizing: how much of an hour's trading one order may be depends on how long
   assert.equal(volumeShareForDuration(2 * 60), 0.10);
 });
 
-test('sizing: a twelve-hour trade may be five times the order a one-hour trade may be', () => {
-  // volumes() is 500/hour. 10% = 50 units; 50% = 250.
+test('sizing: a twelve-hour trade may be ten times the order a one-hour trade may be', () => {
+  // volumes() is 500/hour. 10% = 50 units; 100% = 500 since 28 Sept 2026 (was 50% = 250).
   const short = computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2]), targetDurationMinutes: 60});
   const long = computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2]), targetDurationMinutes: 12 * 60});
   assert.equal(short.quantity, 50);
-  assert.equal(long.quantity, 250);
-  assert.match(long.reasoning, /50% of this item's recent hourly trading[^.]*over your 12-hour trade window/);
+  assert.equal(long.quantity, 500);
+  assert.match(long.reasoning, /100% of this item's recent hourly trading[^.]*over your 12-hour trade window/);
   assert.match(short.reasoning, /10% of this item's recent hourly trading/);
   assert.doesNotMatch(short.reasoning, /trade window/, 'the unchanged 10% cap says nothing new');
   // The player's own history is sized the same way.
@@ -1435,9 +1447,10 @@ test('buy limit: a trade window spanning several resets allows one limit per win
 });
 
 test('buy limit: the market tier starts a long trade from the whole allowance, and the volume cap still binds', () => {
-  // volumes() is 500/hour; at 12 hours the volume cap is 50%, so 250 -- far below three limits of 10,000.
+  // volumes() is 500/hour; at 12 hours the volume cap is 100% since 28 Sept 2026 (it was 50%), so
+  // 500 -- still far below three limits of 10,000, which is the point of the test.
   const long = computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2]), targetDurationMinutes: 12 * 60});
-  assert.equal(long.quantity, 250, 'the market, not the limit, is what binds here');
+  assert.equal(long.quantity, 500, 'the market, not the limit, is what binds here');
   // With the volume cap switched off, the allowance itself shows through.
   const uncapped = computeMarketSuggestion(mapping(), fresh(), volumes({'1': {highPriceVolume: 1e7, lowPriceVolume: 1e7}}),
     {blocklist: new Set([2]), targetDurationMinutes: 12 * 60, maxVolumeShare: 0});

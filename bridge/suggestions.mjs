@@ -282,7 +282,33 @@ export function focusAllows(focus, limit) {
   return true;
 }
 
+/**
+ * Items whose Grand Exchange spread is real but cannot actually be collected, because of a game
+ * mechanic that sits outside the price data. Never bought by any tier.
+ *
+ * 13190, Old school bond. A bond bought on the Grand Exchange arrives UNTRADEABLE, and the fee to
+ * make it tradeable again all but always exceeds the spread -- novi, 28 Sept 2026. So the margin is
+ * not one a player can realise, however wide it looks and however much archived history supports it.
+ *
+ * This is not a fringe case for the market tier, it is one of its favourite picks. A bond is
+ * expensive, has a wide quoted spread, and is one of very few items that can absorb tens of millions
+ * at once, so it is exactly what the ranking reaches for on a large stack: at 89m on 28 Sept it was
+ * the single best pick in the catalogue, committing 81.8m, and in a fourteen-day replay of the
+ * last-print ranking it was chosen 121 times out of 334. It is also TAX-FREE (see the exempt list in
+ * tax.mjs), so marginClearsTax -- the check that catches thin edges -- exempts it by construction and
+ * every margin safety net waves it through.
+ *
+ * The one case novi named where a bond is worth buying is a Jagex announcement of a membership price
+ * rise, which lifts the bond with it. That is a news event rather than a spread, so it belongs with
+ * the news-to-item causal chains, not in the ordinary margin ranking.
+ *
+ * Buying only. gateCandidate is on the three BUY tiers and not on computeHoldingSuggestion, so a
+ * player who already holds one is still helped to sell it -- the standing warn-don't-block rule.
+ */
+export const UNFLIPPABLE_ITEM_IDS = new Set([13190]);
+
 function gateCandidate(itemId, quantity, options) {
+  if (UNFLIPPABLE_ITEM_IDS.has(itemId)) return null;
   if (options.membersBlocked?.(itemId)) return null;
   if (options.focusBlocked?.(itemId)) return null;
   const limit = options.limitFor?.(itemId);
@@ -361,9 +387,9 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
     // resting on a single two-unit print; the player followed it and lost the tax. See volumeReadingFor.
     const ownLiquidity = volumeReadingFor(options.volumes, h.itemId);
     const personalVolumeShare = Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : volumeShareForDuration(targetDurationMinutes);
-    if (ownLiquidity !== null && personalVolumeShare > 0) {
-      const withinVolume = Math.max(1, Math.floor(ownLiquidity * personalVolumeShare));
-      if (withinVolume < quantity) { quantity = withinVolume; shareLimited = true; }
+    if (ownLiquidity !== null) {
+      const withinVolume = orderSizeCap(ownLiquidity, targetDurationMinutes, options);
+      if (withinVolume !== null && withinVolume < quantity) { quantity = withinVolume; shareLimited = true; }
     }
     let durationLimited = false;
     if (targetDurationMinutes !== undefined) {
@@ -412,6 +438,8 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
     buyPrice: p.low,
     sellPrice: p.high,
     source: 'personal',
+    // Carried so the sidebar's verdict can say "your N flips here" without re-deriving it from prose.
+    trades: h.trades,
     reasoning: `You've flipped this ${h.trades} time${h.trades === 1 ? '' : 's'} with a ${Math.round(h.winRate * 100)}% win rate and ~${Math.round(h.avgProfit).toLocaleString('en-US')} GP average profit. Suggested quantity matches your typical size (${quantity})${notes.length ? ' -- ' + notes.join('; ') : ''}; buy near ${p.low.toLocaleString('en-US')} gp, aim to sell near ${p.high.toLocaleString('en-US')} gp for a predicted ~${Math.round(predictedProfit).toLocaleString('en-US')} gp.`,
   };
 }
@@ -803,9 +831,68 @@ const DEFAULT_MAX_VOLUME_SHARE = 0.10;
 // a five-hour trade more permissive would be extrapolating in the risky direction with nothing behind
 // it -- the measured point is at twelve hours and the steps under it were deliberately conservative.
 const VOLUME_SHARE_PER_HOUR = 1 / 24;
+// The most of one hour's volume a single order may ever be, however long the player will wait. Both
+// measurements behind volumeShareForDuration put the useful ceiling here: past about 2x, median
+// profit stops rising while hold time and the loss rate keep climbing.
+export const MAX_VOLUME_SHARE = 2;
+/**
+ * The most units one order may be, given an item hourly liquidity and the player window.
+ *
+ * Two rules in the same place because they answer the same question in different units, and mixing
+ * them up is what shut a large stack out of thin markets. The default is a multiple of ONE hour
+ * volume; options.volumeWindowShare instead takes a share of the volume that will trade in the whole
+ * window, which is what "Bigger positions" turns on. See PositionSizing.java for the measurement.
+ */
+export function orderSizeCap(liquidity, targetDurationMinutes, options = {}) {
+  // A MEASURED zero is not missing data, and the two must not be conflated here. Zero demand means
+  // one unit, never "no constraint" -- that conflation is how an Eclipse Moon chestplate (broken)
+  // nobody had bought for four hours was suggested at quantity 3 against a single two-unit print.
+  // Callers separate the two before this is reached (volumeReadingFor returns null for absent data),
+  // so anything arriving here is a real reading and the floor of one below is what zero deserves.
+  if (!Number.isFinite(liquidity) || liquidity < 0) return null;
+  if (Number.isFinite(options.volumeWindowShare) && options.volumeWindowShare > 0) {
+    const windowHours = Number.isFinite(targetDurationMinutes) && targetDurationMinutes > 0 ? targetDurationMinutes / 60 : 1;
+    return Math.max(1, Math.floor(liquidity * windowHours * options.volumeWindowShare));
+  }
+  const share = Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : volumeShareForDuration(targetDurationMinutes);
+  if (!(share > 0)) return null;
+  return Math.max(1, Math.floor(liquidity * share));
+}
+
 export function volumeShareForDuration(targetDurationMinutes) {
   if (!Number.isFinite(targetDurationMinutes) || targetDurationMinutes <= 0) return DEFAULT_MAX_VOLUME_SHARE;
-  if (targetDurationMinutes >= 12 * 60) return (targetDurationMinutes / 60) * VOLUME_SHARE_PER_HOUR;
+  // Reaches the ceiling at twelve hours instead of two days, and stops there. Changed 28 Sept 2026
+  // on two measurements that agree, after novi's head-to-head: with 100m in hand Copilot offered 24
+  // Echo virtus ornament kits, an item trading about 4 an hour, where EVI would allow 2.
+  //
+  // The old ladder was hours/24, a constant 1/24th of the volume that will trade in the window, and
+  // it came from tools/fill-by-size.mjs -- whose real finding was narrower than it read. Orders up to
+  // about half an hour's volume filled as often as small ones, and there was almost nothing ABOVE
+  // that line to judge, because 52 of the 61 largest orders were cancelled within minutes. The cap
+  // sat at an observation ceiling, not at a measured cliff.
+  //
+  // tools/copilot-fill-sizes.mjs supplied the missing half from 392 of novi's own COMPLETED Copilot
+  // flips, which are sized far more aggressively: 59% of them were larger than this cap allowed, and
+  // banded against one hour of the item's volume the median profit runs 34,510 at or under 0.5x,
+  // 122,167 from 0.5x to 2x, then flattens (119,064 at 2x-5x, 161,462 at 5x-20x) while the median
+  // hold climbs 1.3h -> 11.3h -> 16.4h -> 19.5h, and collapses past 20x. That is survivorship -- a
+  // Copilot order that never filled never became a flip -- so it is an existence result about what
+  // size is achievable, never a fill rate.
+  //
+  // tools/market-tier-ranking.mjs then tested it on outcomes rather than survivors, and agreed. At a
+  // twelve-hour pace, doubling the share held the median return at 5.56%, moved the median order from
+  // 900,000 to 6,620,550 and total profit up 33%, for a loss rate of 8% against 6%. Doubling AGAIN
+  // was clearly worse (4.29% return, 14% losing), and at a two-day pace -- where the share was
+  // already 2x -- doubling took the loss rate from 8% to 14% and doubled stuck capital for 20% more
+  // profit. Both measurements put the useful ceiling at about 2x an hour's volume.
+  //
+  // So the ladder climbs at twice the old rate and is capped where the evidence stops supporting it.
+  // Twelve hours goes 0.50x -> 1.00x; two days stays at 2.00x, which it already was.
+  if (targetDurationMinutes >= 12 * 60)
+    return Math.min(MAX_VOLUME_SHARE, (targetDurationMinutes / 60) * VOLUME_SHARE_PER_HOUR * 2);
+  // Under twelve hours is deliberately unchanged. The band that carries the extra profit takes about
+  // eleven hours to fill, so it belongs to a twelve-hour trade or longer; at a six-hour pace the same
+  // widening measurably cost return (6.94% -> 5.56%) to buy size the window cannot settle.
   if (targetDurationMinutes >= 6 * 60) return 0.25;
   return DEFAULT_MAX_VOLUME_SHARE;
 }
@@ -834,6 +921,57 @@ export function volumeShareForDuration(targetDurationMinutes) {
 // cost) via estimatedFillMinutes -- a candidate that couldn't realistically trade even one unit
 // within that window is dropped, and one that could but only at a smaller quantity has it capped
 // down, exactly like maxSpend, and also switches ranking to total realizable profit (see below).
+/**
+ * A steady view of what an item has been worth, from archived hourly averages: the MEDIAN of each
+ * side over the last `hours` hours, in the same shape as the Wiki's `latest`.
+ *
+ * This exists because the market tier ranks on `latest`, where `high` is the last price anyone paid
+ * and `low` the last price anyone sold at. Its score is built on `high - low - tax`, so maximising
+ * that gap is an argmax over outliers: the item whose last print was a fluke is exactly the one that
+ * wins. Measured live on 28 Sept 2026, an Ape atoll teleport (tablet) was ranked top on a
+ * `latest.high` of 28,756 while every hourly average that day sat between 6,000 and 6,300.
+ *
+ * A median rather than a mean, so a single freak hour moves the estimate by one rank instead of by
+ * its own size. Returns nothing for an item with no archived hours, which is fail-open on purpose:
+ * `computeMarketSuggestion` then ranks that item exactly as it does today rather than dropping it,
+ * so a fresh install with no archive behaves precisely as before.
+ *
+ * Measured by tools/market-tier-ranking.mjs, which runs the shipped ranking twice over the archive
+ * and changes only where prices come from. Over 14 days at an 89m stack, ranking this way instead of
+ * on the last print moved the median return 2.23% -> 5.56%, the share of picks that ever reached
+ * break-even 77% -> 92%, the share that lose GP 23% -> 8%, and capital left stuck 4.06bn -> 513m. It
+ * was never worse at any stack size tested, and at 200k-2m the two are level on return while this one
+ * still loses less.
+ */
+export function robustPrices(hourlyBuckets, hours = ROBUST_PRICE_HOURS) {
+  if (!Array.isArray(hourlyBuckets) || !hourlyBuckets.length) return null;
+  const newest = hourlyBuckets.reduce((m, b) => Math.max(m, b?.ts || 0), 0);
+  const from = newest - hours * 3600;
+  const highs = new Map(), lows = new Map();
+  for (const bucket of hourlyBuckets) {
+    if (!bucket || !bucket.d || !(bucket.ts > from)) continue;
+    for (const [id, row] of Object.entries(bucket.d)) {
+      if (!Array.isArray(row)) continue;
+      if (row[0] > 0) { if (!highs.has(id)) highs.set(id, []); highs.get(id).push(row[0]); }
+      if (row[2] > 0) { if (!lows.has(id)) lows.set(id, []); lows.get(id).push(row[2]); }
+    }
+  }
+  const median = a => { const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+  const out = {};
+  for (const [id, h] of highs) {
+    const l = lows.get(id);
+    if (!l || !l.length || !h.length) continue;
+    // Too few hours is not a steady reading, it is one print wearing a median's clothes. Left out, so
+    // the item falls back to being ranked on `latest` exactly as before.
+    if (h.length < MIN_ROBUST_HOURS || l.length < MIN_ROBUST_HOURS) continue;
+    out[id] = {high: median(h), low: median(l)};
+  }
+  return Object.keys(out).length ? out : null;
+}
+/** How much history the robust price takes its median from, and the least it will accept. */
+export const ROBUST_PRICE_HOURS = 24;
+export const MIN_ROBUST_HOURS = 6;
+
 export function computeMarketSuggestion(mapping, latestPrices, volumes, options = {}) {
   if (!Array.isArray(mapping) || !latestPrices) return null;
   const minProfit = Number.isFinite(options.minProfit) && options.minProfit > 0 ? options.minProfit : 0;
@@ -859,7 +997,23 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     const liquidity = Math.min(v?.highPriceVolume || 0, v?.lowPriceVolume || 0);
     // options.minHourlyVolume raises the liquidity floor above the conservative default, for callers
     // who would rather only see items that clearly trade all day.
-    if (liquidity < Math.max(MIN_HOURLY_VOLUME, options.minHourlyVolume || 0)) continue;
+    //
+    // options.minVolumeInWindow replaces the per-HOUR floor with a per-WINDOW one, because the two
+    // are in different units and the mismatch is what shuts a large cash stack out. The floor asks
+    // for 5 units an hour whatever the player's pace, so an item trading 3 an hour is excluded even
+    // on a two-day trade -- where it will trade 144 units, and a 45m item needs 2 of them to commit
+    // 90m. Measured 28 Sept 2026: this one gate drops 1,388 items at a 2-day pace, more than any
+    // other stage, and the largest unconstrained trade among them is worth 2.5bn.
+    //
+    // Opt-in and off by default, because a thin market is a real risk and not merely an inconvenient
+    // one. thinMarket.mjs is the measured backstop underneath it (under 10% of hours traded, or under
+    // 50% price recurrence, warns and demotes), so relaxing the raw hourly count does not leave an
+    // illiquid item unexamined -- but it is never the default until the measurement says so.
+    const windowHours = targetDurationMinutes !== undefined ? targetDurationMinutes / 60 : 1;
+    const liquidityFloorMet = Number.isFinite(options.minVolumeInWindow) && options.minVolumeInWindow > 0
+      ? liquidity * windowHours >= options.minVolumeInWindow
+      : liquidity >= Math.max(MIN_HOURLY_VOLUME, options.minHourlyVolume || 0);
+    if (!liquidityFloorMet) continue;
     // options.taxFreeOnly keeps only items the GE charges no tax on (under 50 gp, or on the
     // exemption list). Tax took 43% of this account's gross spread over 296 days, so for a small
     // stack working thin margins it can be the difference between growing and standing still.
@@ -876,6 +1030,24 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     // stricter no-history bar -- there is no track record here to earn the benefit of the doubt.
     if (options.requireMarginOverTax !== false
         && !marginClearsTax(net, tax, options.marginTaxMultiple ?? MARGIN_TAX_NO_HISTORY_MULTIPLE)) continue;
+    // RANK on a steady price, QUOTE the live one. `options.rankPrices` (see robustPrices) holds each
+    // item's median over the last day; `p` above stays the live reading, because that is the only
+    // price anyone can actually transact at and quoting a median nobody is paying would be a
+    // different change entirely -- an unmeasured one, and sell-side patience has already been
+    // measured separately (tools/sell-patience-observed.mjs).
+    //
+    // The item has to clear every bar on BOTH views. Robust alone would let EVI offer a spread that
+    // has since closed; live alone is what let one freak print win the whole ranking. An item with no
+    // robust reading keeps the live one for both, so nothing changes on a fresh install with no
+    // archive yet.
+    const r = options.rankPrices?.[String(item.id)];
+    const rankHigh = r && r.high > 0 ? r.high : p.high;
+    const rankLow = r && r.low > 0 ? r.low : p.low;
+    const rankTax = estimateUnitTax(item.id, rankHigh);
+    const netRank = rankHigh - rankLow - rankTax;
+    if (netRank <= 0) continue;
+    if (options.requireMarginOverTax !== false
+        && !marginClearsTax(netRank, rankTax, options.marginTaxMultiple ?? MARGIN_TAX_NO_HISTORY_MULTIPLE)) continue;
     // Belt and braces: MIN_HOURLY_VOLUME should already have excluded anything untraded here, but the
     // same reading is cheap and this tier must never be the one that offers a dead spread.
     if (implausibleSpread(net, p.low, volumeReadingFor(volumes, item.id))) continue;
@@ -913,7 +1085,18 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
       if (affordableByStack < quantity) { quantity = affordableByStack; stackLimited = true; }
     }
     let shareLimited = false;
-    if (volumeShare > 0) {
+    // options.volumeWindowShare replaces the per-HOUR cap with a share of the volume that will trade
+    // in the player's whole WINDOW. The two are in different units, and the mismatch is what shuts a
+    // large stack out of exactly the items it can use. An Abyssal dagger trades about 6 an hour and
+    // is worth 1.27m, so a 29-hour trade will see about 174 of them change hands; capping the order
+    // at "one hour's volume" allows 6, or 0.8m of capital, on an item whose market would absorb 20
+    // times that. Measured 28 Sept 2026 against Flipping Copilot's own picks, which take 20-33% of
+    // window volume on such items. Off unless the caller sets it, so nothing changes by default.
+    if (Number.isFinite(options.volumeWindowShare) && options.volumeWindowShare > 0) {
+      const windowHours = targetDurationMinutes !== undefined ? targetDurationMinutes / 60 : 1;
+      const affordableByWindow = Math.max(1, Math.floor(liquidity * windowHours * options.volumeWindowShare));
+      if (affordableByWindow < quantity) { quantity = affordableByWindow; shareLimited = true; }
+    } else if (volumeShare > 0) {
       const affordableByVolume = Math.max(1, Math.floor(liquidity * volumeShare));
       if (affordableByVolume < quantity) { quantity = affordableByVolume; shareLimited = true; }
     }
@@ -921,16 +1104,25 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     if (!gated) continue;
     const limitLimited = gated.limited;
     quantity = gated.quantity;
+    // The floor is judged on the more cautious of the two, for the same reason the sidebar's headline
+    // is (see headlineProfit in server.mjs): a trade is never offered on the strength of a number EVI
+    // has a steadier reading contradicting. What the reasoning quotes stays the live figure, which is
+    // what the player would actually collect at the prices they are being told to use.
     const predictedProfit = net * quantity;
-    if (predictedProfit < minProfit) continue;
+    if (Math.min(predictedProfit, netRank * quantity) < minProfit) continue;
     // Rewards both margin and real liquidity, log-damped so one exceptionally deep item can't
     // dominate purely on volume with a thin margin. Once a cash stack or a target duration is
     // known, ranking targets the best *total* profit actually reachable within that constraint
     // rather than the best per-unit margin -- otherwise a wildly unaffordable (or unrealistically
     // slow) item would still win the ranking capped down to a quantity of 1, instead of a cheaper
     // or faster-moving item that can be bought and sold for real within the same constraint.
+    // Scored on the robust margin, which is the whole point of the change: WHICH item wins is decided
+    // by what the item has steadily been worth, not by whichever one happened to print a freak trade
+    // in the last few minutes. Identical to the old line when there is no archived reading, since
+    // netRank then falls back to net.
+    const rankProfit = netRank * quantity;
     const constrained = maxSpend !== undefined || targetDurationMinutes !== undefined;
-    let score = (constrained ? predictedProfit : net) * Math.log(liquidity + 1);
+    let score = (constrained ? rankProfit : netRank) * Math.log(liquidity + 1);
     // 'profit-per-hour' ranks by how much the trade is expected to make per hour of waiting, using
     // the calibrated fill estimate for both sides. It deliberately prefers a small, quick, liquid
     // flip over a large slow one worth more on paper -- which is what someone with little gp needs,
@@ -938,8 +1130,27 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     // unchanged.
     if (options.rankBy === 'profit-per-hour') {
       const hours = Math.max(correctedFillMinutes(estimatedFillMinutes(quantity, liquidity, VOLUME_WINDOW_MINUTES)) * 2, FILL_FLOOR_MINUTES) / 60;
-      score = predictedProfit / hours;
+      score = rankProfit / hours;
     }
+    // 'profit' drops the liquidity multiplier entirely. The multiplier is what makes a large stack
+    // useless: `log(liquidity + 1)` spans about 12 across the catalogue while the profits it scales
+    // span thousands, so a deep cheap item beats a shallow expensive one even when the expensive one
+    // makes several times as much. At 89m on 28 Sept 2026 that produced a 599,845 gp Water rune trade
+    // ahead of an 81,818,646 gp Old school bond trade worth more than twice as much -- and the median
+    // surviving candidate committed 15,333 gp of the 89m. Opt-in, and measured before it is used:
+    // ranking on absolute profit alone has been the single most damaging thing measured on this
+    // project before (see the EVI Score V1 work in README.md), so it is never the default and never
+    // goes anywhere near a player without tools/market-tier-ranking.mjs behind it.
+    if (options.rankBy === 'profit') score = rankProfit;
+    // 'soft-liquidity' keeps a liquidity preference but stops it deciding the ranking on its own.
+    // `log(liquidity + 1)` spans about 1.4 for an item trading 3 an hour against 9.5 for one trading
+    // 12,000, so a thin item carries a near-sevenfold handicap however much more the trade is worth.
+    // Measured 28 Sept 2026, that is why the robust ranking picked a thin item only 3 times in 193 --
+    // and every one of Flipping Copilot's genuinely good picks that day was a thin, expensive item
+    // (Abyssal dagger at 6 an hour, Light ballista at 3, Seers icon at 0), while every one of its
+    // losers was a liquid thin-margin item EVI already refuses on tax. The square root halves that
+    // handicap in log terms without discarding the preference the way 'profit' does.
+    if (options.rankBy === 'soft-liquidity') score = (constrained ? rankProfit : netRank) * Math.sqrt(Math.log(liquidity + 1));
     if (score <= 0) continue;
     candidates.push({item, p, net, quantity, predictedProfit, score, cashLimited, durationLimited, limitKnown, fullSize, limitLimited, shareLimited, stackLimited});
   }
@@ -984,17 +1195,58 @@ export function computePushedSuggestion(candidates, options = {}) {
   const blocklist = options.blocklist instanceof Set ? options.blocklist : new Set();
   const maxSpend = Number.isFinite(options.maxSpend) && options.maxSpend > 0 ? options.maxSpend : undefined;
   const minProfit = Number.isFinite(options.minProfit) && options.minProfit > 0 ? options.minProfit : 0;
+  // Ranked by the BRIDGE's own measure, with the scanner's score only as a tie-break.
+  //
+  // Until 28 Sept 2026 this sorted on `c.score` alone -- the scanner's EVI Score V2, computed in the
+  // browser. That made the least-evidenced ranking in the system the one that decided what a player
+  // saw, because the pushed tier takes precedence over the market tier whenever the scanner is open.
+  // Measured live at an 85m stack: the pushed tier offered Teak logs worth 12,816 gp while the market
+  // tier, on the same prices and the same cash, offered about ten times that. The scanner's score is
+  // still the tie-break, so where the bridge genuinely cannot separate two candidates the browser's
+  // richer view (price history, the player's own record, news) still orders them.
+  //
+  // Same shape as computeMarketSuggestion's score, for the same reason: margin scaled by real
+  // liquidity, log-damped so one deep item cannot win on volume alone, and on the robust price where
+  // one exists so a freak print cannot carry a candidate. It honours options.rankBy identically, so
+  // "Bigger positions" reaches this tier as well -- before this it could not, which is why turning the
+  // setting on changed nothing at all for a player with the scanner open.
+  const scoreOf = c => {
+    const r = options.rankPrices?.[String(c.itemId)];
+    const net = r && r.high > 0 && r.low > 0
+      ? Math.min(c.net, r.high - r.low - estimateUnitTax(c.itemId, r.high))
+      : c.net;
+    if (!(net > 0)) return 0;
+    const liquidity = volumeReadingFor(options.volumes, c.itemId) ?? 0;
+    const qty = Math.max(1, Math.round(Number.isFinite(c.qty) && c.qty > 0 ? c.qty : 1));
+    if (options.rankBy === 'profit') return net * qty;
+    if (options.rankBy === 'soft-liquidity') return net * qty * Math.sqrt(Math.log(liquidity + 1));
+    return net * qty * Math.log(liquidity + 1);
+  };
   const ranked = candidates
     .filter(c => c && Number.isFinite(c.itemId) && c.itemId > 0 && !blocklist.has(c.itemId)
       && Number.isFinite(c.buy) && c.buy > 0 && Number.isFinite(c.sell) && c.sell > 0 && Number.isFinite(c.net) && c.net > 0)
-    .sort((a, b) => (b.score || 0) - (a.score || 0));
+    .sort((a, b) => (scoreOf(b) - scoreOf(a)) || ((b.score || 0) - (a.score || 0)));
   for (const c of ranked) {
     // The scanner ranks on far more than current margin, but it cannot rank away the tax: an edge
     // thinner than this item's own tax is dropped here too (see marginClearsTax).
     if (options.requireMarginOverTax !== false
         && !marginClearsTax(c.net, estimateUnitTax(c.itemId, c.sell),
              options.marginTaxMultiple ?? MARGIN_TAX_NO_HISTORY_MULTIPLE)) continue;
-    let quantity = Math.max(1, Math.round(Number.isFinite(c.qty) && c.qty > 0 ? c.qty : 1));
+    // Sized by EVI, not by the browser, wherever EVI knows the item's buy limit.
+    //
+    // The scanner sends a quantity it worked out from the bankroll typed into the page and its own
+    // liquidity rule, and until 28 Sept 2026 that number was the ceiling here -- every cap below could
+    // only shrink it. So the tier that answers most often for anyone with the scanner open was sized
+    // by a different program against a different cash figure, and neither the player's trade pace nor
+    // "Bigger positions" could move it. `limitOf` lets the bridge start from the item's own GE buy
+    // limit across the windows the trade spans, exactly as the market tier does; the cash stack, the
+    // volume cap and the limit already used all still bind below. Without a limit reading it falls
+    // back to the scanner's own figure, so nothing changes for a caller that cannot supply one.
+    const pushedLimit = options.limitOf?.(c.itemId);
+    const scannerQty = Math.max(1, Math.round(Number.isFinite(c.qty) && c.qty > 0 ? c.qty : 1));
+    let quantity = Number.isFinite(pushedLimit) && pushedLimit > 0
+      ? Math.max(1, limitAllowance({limit: pushedLimit, targetDurationMinutes: options.targetDurationMinutes}))
+      : scannerQty;
     // The same cap on how much of an item's hourly trading one order may be that the other two tiers
     // apply (see volumeShareForDuration). A scanner-pushed pick carries the scanner's own quantity,
     // sized from bankroll and the item's buy limit but not from what the item actually trades -- so
@@ -1003,11 +1255,10 @@ export function computePushedSuggestion(candidates, options = {}) {
     // mode behind every large loss the 90-day backtest found. A measured zero constrains to a single
     // unit; genuinely absent volume data constrains nothing, exactly as in the other tiers.
     let shareLimited = false;
-    const pushedShare = Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : volumeShareForDuration(options.targetDurationMinutes);
     const pushedLiquidity = volumeReadingFor(options.volumes, c.itemId);
-    if (pushedLiquidity !== null && pushedShare > 0) {
-      const withinVolume = Math.max(1, Math.floor(pushedLiquidity * pushedShare));
-      if (withinVolume < quantity) { quantity = withinVolume; shareLimited = true; }
+    if (pushedLiquidity !== null) {
+      const withinVolume = orderSizeCap(pushedLiquidity, options.targetDurationMinutes, options);
+      if (withinVolume !== null && withinVolume < quantity) { quantity = withinVolume; shareLimited = true; }
     }
     // Same world/buy-limit gates every other tier applies, so a scanner-pushed pick can't bypass them.
     const gated = gateCandidate(c.itemId, quantity, options);
@@ -1026,7 +1277,11 @@ export function computePushedSuggestion(candidates, options = {}) {
     const notes = [];
     if (cashLimited) notes.push('reduced to what your current cash stack can afford');
     if (limitLimited) notes.push('reduced to what EVI has seen left of this item\'s GE buy limit, which is all that can fill before the limit resets in 4 hours -- a bigger offer would sit part-filled until then');
-    if (shareLimited) notes.push(`reduced to ${Math.round(pushedShare * 100)}% of this item's recent hourly trading`);
+    // Worded from whichever rule actually bound, since the two are in different units and quoting the
+    // wrong one would misdescribe the order (see orderSizeCap).
+    if (shareLimited) notes.push(Number.isFinite(options.volumeWindowShare) && options.volumeWindowShare > 0
+      ? `reduced to ${Math.round(options.volumeWindowShare * 100)}% of what this item trades over your whole trade window`
+      : `reduced to ${Math.round((Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : volumeShareForDuration(options.targetDurationMinutes)) * 100)}% of this item's recent hourly trading`);
     return {
       itemId: c.itemId,
       name,
@@ -1467,6 +1722,9 @@ export async function pickWithForecast({rank, forecastFor, policy, horizon, cush
         blocklist.add(candidate.itemId);
         continue;
       }
+      // Carried whether or not anything is wrong with it, so a pick that PASSED can still show what
+      // was checked (see verdict.mjs). Attaching it changes nothing on its own.
+      if (support && support.detail) candidate.sellSupport = support.detail;
       if (support && support.warning) {
         candidate.reasoning = `${support.warning} ${candidate.reasoning || ''}`;
         candidate.sellSupport = support.detail;

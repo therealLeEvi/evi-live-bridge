@@ -358,6 +358,10 @@ let history = loadJSON('eviHistory', DEFAULT_HISTORY);
 let feedback = loadJSON('eviFeedback', {});
 let rows = [];
 let market = null;
+// Each item's median buy/sell over the last day of archived hours, from the bridge (/api/robust-prices).
+// Null until fetched, and null forever if the bridge is down, older, or has no archive yet -- in which
+// case every row falls back to the quoted spread exactly as before. See buildRows.
+let steadyPrices = null;
 
 const API = {
   mapping:'/api/market/mapping',
@@ -609,6 +613,16 @@ async function loadPredictions(){
   btn.disabled=false;
 }
 
+// How the Expected column is drawn once a steady reading exists. The cautious figure leads; the
+// quoted one is shown beneath it, struck through, whenever the two disagree -- so the spread stays
+// visible and it is obvious WHY the number is lower than the buy/sell columns imply. A row whose
+// steady spread is gone entirely is called out rather than quietly shown as a small number.
+function expectedCell(r){
+  if(r.flatters) return '<span class="bad" title="The last trade prints imply a spread this item has not steadily had. Its 24-hour median buy and sell leave nothing after tax.">no steady spread</span>';
+  if(r.expectedQuoted!=null && r.expected!=null && r.expectedQuoted>r.expected)
+    return '<span class="good">'+gp(r.expected)+'</span> <span class="muted" style="text-decoration:line-through" title="What the last two trade prints imply. EVI uses the lower figure, from this item\x27s 24-hour median.">'+gp(r.expectedQuoted)+'</span>';
+  return '<span class="good">'+gp(r.expected)+'</span>';
+}
 function buildRows(mapping, latest, m5, h1){
   const now=Math.floor(Date.now()/1000);
   const maxPos=Math.max(0,gpFieldValue('maxPos'));
@@ -640,7 +654,34 @@ function buildRows(mapping, latest, m5, h1){
     const liqQty=Math.max(1,Math.floor(lowVol1*(mode==='Fast'?.18:mode==='Medium'?.30:.45)));
     const qty=Math.min(limit, affordableByPosition, affordableByBankroll, liqQty);
     if(qty < 1) continue;
-    const capital=qty*p.low, expected=qty*net;
+    const capital=qty*p.low;
+
+    // What the row is really worth, not what its last two prints imply.
+    //
+    // `net` above is built from `latest`: p.high is the last price ANYONE paid and p.low the last
+    // anyone sold at, so the gap between them is maximised by an outlier. Measured 28 Sept 2026
+    // against this page's own top 25 rows: a Water rune showed 119,969 while buyers were really
+    // paying an average that made it 47,437; a Jug of wine showed 9,126 against 192; and a Smoke
+    // rune showed 62,493 on a trade that was actually a 5,458 LOSS. A Mithril chainbody quoted a
+    // 244 gp spread while its steady spread was inverted.
+    //
+    // steadyPrices is each item's median of both sides over the last day of archived hours, from the
+    // bridge's /api/robust-prices. The headline figure is the CAUTIOUS of the two, which is exactly
+    // what the sidebar does (headlineProfit in bridge/server.mjs) -- the two surfaces disagreeing
+    // about the same row at the same moment is what prompted this. The quoted figure is kept beside
+    // it as `expectedQuoted` rather than thrown away, so the spread is still visible.
+    //
+    // No reading for an item -- no archive, too few hours, or an older bridge with no such route --
+    // leaves the row exactly as it was. Fail open: a missing measurement must never invent a number.
+    const steady=(typeof steadyPrices!=='undefined'&&steadyPrices)?steadyPrices[id]:null;
+    let netSteady=null, flatters=false;
+    if(steady && steady.high>0 && steady.low>0){
+      netSteady=steady.high-steady.low-geTax(steady.high);
+      // The steady view says there is no trade here at all, while the last print says there is.
+      flatters = netSteady<=0;
+    }
+    const expectedQuoted=qty*net;
+    const expected=netSteady===null?expectedQuoted:Math.min(expectedQuoted, qty*netSteady);
 
     const opp=piecewise(roi,[[0,0],[.005,5],[.01,10],[.02,16],[.04,22],[.07,25]]);
     const turnover=v1/Math.max(1,limit);
@@ -704,7 +745,7 @@ function buildRows(mapping, latest, m5, h1){
     score=clamp(score,0,100);
 
     out.push({
-      id:item.id,name:item.name,members:item.members,limit,buy:p.low,sell:p.high,net,roi,v5,v1,qty,capital,expected,
+      id:item.id,name:item.name,members:item.members,limit,buy:p.low,sell:p.high,net,roi,v5,v1,qty,capital,expected,expectedQuoted,netSteady,flatters,
       icon:item.icon||null,highalch:item.highalch??null,tax,highTime:p.highTime||null,lowTime:p.lowTime||null,
       avgHigh1h:d1.avgHighPrice??null,avgLow1h:d1.avgLowPrice??null,
       hist,mode,score,crowd,age,turnover,spreadRatio,pred:predictions[id]||null
@@ -738,6 +779,14 @@ async function refresh(){
     if(!mapR.ok||!latestR.ok||!m5R.ok||!h1R.ok) throw new Error('One or more RuneScape Wiki API requests failed.');
     const [mapping,latestJ,m5J,h1J]=await Promise.all([mapR.json(),latestR.json(),m5R.json(),h1R.json()]);
     market={mapping,latest:latestJ.data||{},m5:m5J.data||{},h1:h1J.data||{}};
+    // Each item's steady price from the bridge's local archive, so the Expected column can show what
+    // a row is really worth rather than what its last two prints imply -- the same cautious figure
+    // the plugin sidebar shows. Deliberately not awaited alongside the Wiki calls above: it is a
+    // nicety, the page works without it, and a bridge that is down or older must not stop a refresh.
+    try{
+      const rp=await fetch('/api/robust-prices',{cache:'no-store'});
+      if(rp.ok){const j=await rp.json();steadyPrices=j&&j.prices?j.prices:null;}
+    }catch(e){ steadyPrices=null; }
     rows=buildRows(market.mapping,market.latest,market.m5,market.h1);
     rebuildNewsMatches();render();pushSuggestions();
     st.innerHTML='<span class="good">Live market loaded.</span> Prices are observations, not guaranteed offers. Last refresh: '+new Date().toLocaleTimeString();
@@ -933,7 +982,7 @@ function render(){
     <td>${predCell(r.pred?r.pred.overall:null)}</td><td>${horizonCell(r.pred?r.pred.p1:null)}</td><td>${horizonCell(r.pred?r.pred.p6:null)}</td><td>${horizonCell(r.pred?r.pred.po:null)}</td>
     <td><b>${gpExact(r.buy)}</b></td><td><b>${gpExact(r.sell)}</b></td><td class="good">${gp(r.net)}</td><td>${pct(r.roi)}</td>
     <td>${gp(r.v5)}</td><td>${gp(r.v1)}</td><td>${gp(r.limit)}</td><td>${gp(r.qty)}</td>
-    <td>${gp(r.capital)}</td><td class="good">${gp(r.expected)}</td><td>${histText(r.hist)}</td>
+    <td>${gp(r.capital)}</td><td>${expectedCell(r)}</td><td>${histText(r.hist)}</td>
     <td>${r.hist?hfmt(r.hist.medianHoldH):'—'}</td>
     <td class="${crowdClass(r.crowd)}">${Math.round(r.crowd)}%</td>
     <td class="feedback">
@@ -998,6 +1047,8 @@ async function openItem(id){
     +'<span class="k">Buy '+gpExact(r.qty)+' at</span><span class="v strong">'+gpExact(r.buy)+'</span>'
     +'<span class="k">Then sell at</span><span class="v strong">'+gpExact(r.sell)+'</span>'
     +'<span class="k">Expected, after tax</span><span class="v strong good">'+gp(r.expected)+'</span>'
+    +(r.expectedQuoted!=null&&r.expectedQuoted>r.expected
+      ?'<span class="k">Quoted spread implies</span><span class="v muted">'+gp(r.expectedQuoted)+' &mdash; the last two trade prints. EVI uses the lower figure, from this item\x27s 24-hour median buy and sell.</span>':'')
     +'<span class="k">Cash needed</span><span class="v">'+gp(r.capital)+'</span>'
     +'<span class="k">Tax per item</span><span class="v">'+gpExact(r.tax)+'</span>'
     +'<span class="k">Profit per item</span><span class="v good">'+gpExact(r.net)+'</span>'
@@ -1187,7 +1238,7 @@ function buildPortfolio(){
   document.querySelector('#portfolioTable tbody').innerHTML=picks.map((r,i)=>`<tr>
     <td>${i+1}</td><td><b>${escapeHtml(r.name)}</b><br><small>${itemAccessLabel(r.members)}</small></td><td class="${scoreClass(r.score)}">${r.score.toFixed(0)}</td>
     <td><span class="tag ${r.mode.toLowerCase()}">${r.mode}</span></td><td><b>${gpExact(r.buy)}</b></td><td><b>${gpExact(r.sell)}</b></td><td>${gp(r.qty)}</td>
-    <td>${gp(r.capital)}</td><td class="good">${gp(r.expected)}</td>
+    <td>${gp(r.capital)}</td><td>${expectedCell(r)}</td>
   </tr>`).join('');
 
   const used=picks.reduce((a,r)=>a+r.capital,0), exp=picks.reduce((a,r)=>a+r.expected,0);

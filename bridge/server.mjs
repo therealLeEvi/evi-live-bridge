@@ -7,7 +7,7 @@ import {Store} from './store.mjs';
 import {createMarketCache} from './marketCache.mjs';
 import {createIconCache} from './icons.mjs';
 import {parseLog,buildOffers,flipsFrom,summarise,resolveLogFile} from './exchangeLog.mjs';
-import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,holdingPreempts,hasLiveSellOffer,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_MULTIPLE,MARGIN_TAX_NO_HISTORY_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
+import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,holdingPreempts,hasLiveSellOffer,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_MULTIPLE,MARGIN_TAX_NO_HISTORY_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,robustPrices,ROBUST_PRICE_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
 import {estimateUnitTax} from './tax.mjs';
 import {createSuggestionLog,checksOf} from './suggestionLog.mjs';
 import {joinSuggestionOutcomes,summarizeOutcomes} from './suggestionOutcomes.mjs';
@@ -20,6 +20,7 @@ import {relistAdvice} from './relist.mjs';
 import {sellAdvice} from './sellAdvice.mjs';
 import {buyMarginAdvice} from './buyAdvice.mjs';
 import {wealthSnapshot,createWealthLog} from './wealth.mjs';
+import {suggestionVerdict} from './verdict.mjs';
 import {goalStatus} from './goal.mjs';
 import {userAgent} from './userAgent.mjs';
 import {sharePreview} from './sharePreview.mjs';
@@ -70,13 +71,109 @@ const login=`<!doctype html><meta charset="utf-8"><title>EVI Live · Unlock</tit
 // -- sends minProfit=1, which is read as "no minimum at all" and switches off both the floor and the
 // margin-over-tax bar with it. See MinProfitTier.NONE in the plugin.
 export const AUTO_MIN_PROFIT=500;
+
+// ...and, where no minimum was set, a share of what the player is actually holding.
+//
+// 500 gp alone is a floor against absurdity, not against irrelevance. On 28 September 2026 novi had
+// 89m in hand and EVI was offering trades worth "anywhere from 500 gp to 12k": each one passed the
+// floor, each one was real, and none of them was worth a Grand Exchange slot at that size. Their
+// words, and the right principle: it should always look at the cash stack.
+//
+// A share was considered when the floor was first written and rejected, on the grounds that it scales
+// with capital while the absurdity does not. That was right about a share ALONE. Taking the larger of
+// the two keeps both: a player with 50k is governed by the 500, since 0.1% of anything under 500,000
+// is less than that, so the cheap high-volume flipping a small stack lives on is untouched.
+//
+// 0.1% measured over 420 real buy suggestions that recorded a cash stack:
+//
+//   floor                     dropped   median kept   median dropped
+//   500 flat (before)            2%        612,968             72
+//   max(500, 0.05% of stack)    16%        712,400          5,895
+//   max(500, 0.10% of stack)    21%        752,060          9,557
+//   max(500, 0.25% of stack)    32%        896,748         48,152
+//   max(500, 1.00% of stack)    67%        985,103        436,954
+//
+// The median dropped suggestion at 0.1% is worth 9,557 gp -- exactly the band being complained about --
+// and the median kept rises by about a quarter. At 0.25% the median dropped is 48,152, which is a real
+// trade on a modest stack, so the line sits where the harm stops rather than where the numbers look
+// tidiest. At 89m it asks for 89,000; at 380m, 380,000; at 50k, still just 500.
+//
+// Only where nothing was chosen. A player who sets 200k means 200k, and an explicit setting is not
+// something to quietly raise on them.
+export const AUTO_STACK_SHARE=0.001;
+export function autoMinProfit(cash) {
+  if(!Number.isFinite(cash)||cash<=0)return AUTO_MIN_PROFIT;
+  return Math.max(AUTO_MIN_PROFIT,Math.round(cash*AUTO_STACK_SHARE));
+}
+/**
+ * The single profit figure the sidebar leads with: the more cautious of the quoted spread and what
+ * buyers have actually been paying, or the quoted spread alone when nothing has been measured.
+ *
+ * Kept out of the request handler and exported so it can be tested directly. The two checks that
+ * have shipped switched off for every default user were both buried in handler code with no test
+ * that named the default -- see tests/defaultPolicy.test.mjs for the standing habit.
+ *
+ * `supported` is null when there is no reading, which is fail-open on purpose: no measurement must
+ * never invent a constraint, and the quoted spread is then the only honest answer available.
+ */
+export function headlineProfit(quoted,supported) {
+  if(!Number.isFinite(quoted))return null;
+  if(!Number.isFinite(supported))return quoted;
+  return Math.min(quoted,supported);
+}
+
+/** The most positions EVI will ever suggest at once, whatever a caller asks for. */
+export const MAX_POSITIONS=3;
+/**
+ * How many trades to suggest on this request: 1 unless the player has opted into more.
+ *
+ * Clamped rather than trusted. The parameter comes from a config dropdown today, but the endpoint is
+ * reachable by anything holding the plugin key, and novi's standing objection is to EVI fanning out
+ * across the Grand Exchange: allocating a stack across eight trades divides the cash by eight, and an
+ * eighth-sized trade cannot make the profit they trade for. So the ceiling lives here, on the server,
+ * rather than resting on the dropdown only offering three.
+ *
+ * Anything absent, unparseable, zero, negative or fractional lands on 1. One is also what an older
+ * plugin sends (nothing at all), so the default path is unchanged for everybody who has not asked.
+ */
+export function positionsWanted(searchParams) {
+  const asked=Number(searchParams?.get?.('maxSuggestions'));
+  if(!Number.isFinite(asked))return 1;
+  return Math.min(MAX_POSITIONS,Math.max(1,Math.floor(asked)));
+}
+
+/**
+ * The three settings "Bigger positions" turns on together, and the reason they are one switch rather
+ * than three. Each measured neutral or worse on its own, because they gate the same class of trade in
+ * series: the per-hour liquidity floor keeps a thin item out; if admitted, the ranking's
+ * `log(liquidity)` term means it never wins; and if it won, the per-hour cap sizes it to a handful of
+ * units so the trade is too small to matter. Moving one leaves the other two still shutting the door.
+ *
+ * Measured over 14 archived days at 20m, 78m and 200m stacks at a twelve-hour pace
+ * (tools/market-tier-ranking.mjs): median profit per trade 150,000 -> 380,000-480,000, median order
+ * 6.6m -> 15.2m, share of picks that lose GP 8% -> 9-10%. In the band it exists to reach -- items
+ * trading under 25 an hour -- EVI today picks 1 to 3 and loses on 67-100% of them, against 15 to 21
+ * picks losing on 10-13% here. Opt-in, never a default: it raises the loss rate, and at a two-day
+ * pace the same numbers take it from 8% to 13%, because 10% of two days' volume is a much larger
+ * order than 10% of twelve hours'.
+ */
+export const BIGGER_POSITIONS={minVolumeInWindow:24,rankBy:'profit',volumeWindowShare:0.10};
+
 export function suggestionPolicy(searchParams) {
   const askedFor=Math.max(0,Number(searchParams.get('minProfit'))||0);
   const minProfitChosen=askedFor>0;
+  const cash=Number(searchParams.get('cash'));
+  const biggerPositions=searchParams.get('sizing')==='bigger';
   return {
     askedFor,
     minProfitChosen,
-    minProfit:minProfitChosen?askedFor:AUTO_MIN_PROFIT,
+    biggerPositions,
+    // Spread across the tiers below. The sizing half (the window-relative floor and cap) is about how
+    // much of a market an order can be, which is the same physics whichever tier picked the item, so
+    // it applies to both. The RANKING half was measured on the market tier and is applied only there.
+    sizing:biggerPositions?{minVolumeInWindow:BIGGER_POSITIONS.minVolumeInWindow,volumeWindowShare:BIGGER_POSITIONS.volumeWindowShare}:{},
+    marketRankBy:biggerPositions?BIGGER_POSITIONS.rankBy:undefined,
+    minProfit:minProfitChosen?askedFor:autoMinProfit(cash),
     // An edge thinner than the item's own GE tax is not offered (see marginClearsTax in
     // suggestions.mjs for the 335-hour measurement). Per-item rather than flat: the bar is that item's
     // own tax, and a tax-free item is exempt by construction. On unless NONE asked for everything.
@@ -267,6 +364,8 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
   // because the scanner asks without naming one -- looking up its own empty key was why the goal
   // reported an unknown coin count while the player was logged in.
   const lastCash=new Map();
+  // The steady-price reading served to the scanner, rebuilt at most every five minutes.
+  let robustCache=null;
   function cashFor(account) {
     const own=lastCash.get(account||'');
     if(own)return own;
@@ -498,7 +597,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           const maxStackShare=Number.isFinite(stackShareParam)&&stackShareParam>0&&stackShareParam<=100?stackShareParam/100:undefined;
           // Starter profile (EviLiveConfig.tradingProfile): market-wide picks restricted to items the
           // GE charges no tax on. See TradingProfile.java for the backtest behind it.
-          const {taxFreeOnly,requireCushion}=suggestionPolicy(url.searchParams);
+          const {taxFreeOnly,requireCushion,sizing,marketRankBy}=suggestionPolicy(url.searchParams);
           async function cushionForSuggestion(candidate) {
             try {
               const url2=`https://prices.runescape.wiki/api/v1/osrs/timeseries?id=${candidate.itemId}&timestep=5m`;
@@ -644,7 +743,11 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
                     detail:{...detail,belowMinimumAtSupportedPrice:true}};
                 }
               }
-              return warning?{warning,detail}:null;
+              // The detail comes back even when nothing is wrong with it. It used to be dropped on a
+              // pass, which is why a clean pick had no reading to show: the sidebar could say what it
+              // distrusted and never what it had actually checked. A result with no `warning` changes
+              // no behaviour anywhere -- pickWithForecast only acts on `blocked` and `warning`.
+              return warning?{warning,detail}:(detail?{detail}:null);
             } catch { return null; }
           }
           // Holding both halves of a correlated pair is closer to one larger position than two
@@ -780,11 +883,35 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // Both ranking tiers below produce BUY suggestions, so both are held back while the free
           // slots are only enough for the exits already owed. The holding, persisted and inventory
           // tiers above are sell-side reminders and deliberately still run.
+          // The market/pushed ranking at an arbitrary budget, built once and reused. The primary path
+          // below keeps its own copy untouched; this exists so the additional-positions loop further
+          // down can re-rank against the cash still unspent without that loop having to reach inside
+          // the block below. The two fetches it needs are both already cached (itemIndex, and the 1h
+          // volumes behind suggestionPrices' 60s cache), so building it a second time is cheap, and
+          // it is only ever built when something actually asks for it.
+          let marketDeps=null;
+          async function marketRankAt(bl,spend,mp) {
+            if(!marketDeps) {
+              const [,marketVolumes]=await Promise.all([
+                itemIndex(),
+                volumes?Promise.resolve(volumes):suggestionPrices.get('https://prices.runescape.wiki/api/v1/osrs/1h',60000).then(t=>JSON.parse(t).data||{}),
+              ]);
+              let rankPrices=null;
+              try { rankPrices=robustPrices(archive.recentHourly(Math.floor(Date.now()/3600000)*3600-ROBUST_PRICE_HOURS*3600)); } catch {}
+              marketDeps={marketVolumes,rankPrices};
+            }
+            const fresh=pushedSuggestions.length && (Date.now()-pushedSuggestionsAt)<=MAX_PUSHED_AGE_MS;
+            return fresh
+              ?computePushedSuggestion(pushedSuggestions,{minProfit:mp,blocklist:bl,maxSpend:spend,volumes,targetDurationMinutes,
+                  rankPrices:marketDeps.rankPrices,limitOf:id=>mappingCache.index?.get(id)?.limit,rankBy:marketRankBy,...sizing,...gates})
+              :computeMarketSuggestion(mappingCache.list,latest,marketDeps.marketVolumes,
+                {minProfit:mp,blocklist:bl,maxSpend:spend,targetDurationMinutes,maxStackShare,taxFreeOnly,rankPrices:marketDeps.rankPrices,rankBy:marketRankBy,...sizing,...gates});
+          }
           if(!suggestion && !geFull && !buysHeldForExits && wantSource!=='market') {
             suggestion=await pickWithForecast({
               // Imported flips rank alongside observed ones (see Store.importFlips): a player who
               // tracked trades elsewhere for months shouldn't be ranked as if they had no history.
-              rank:bl=>computeSuggestion([...state.flips,...state.importedFlips],latest,Date.now(),{minProfit,blocklist:bl,risk,maxSpend,targetDurationMinutes,volumes,maxStackShare,...gates}),
+              rank:bl=>computeSuggestion([...state.flips,...state.importedFlips],latest,Date.now(),{minProfit,blocklist:bl,risk,maxSpend,targetDurationMinutes,volumes,maxStackShare,...sizing,...gates}),
               forecastFor:forecastForSuggestion,policy:forecastPolicy,horizon:forecastHorizon,
               cushionFor:cushionForSuggestion,requireCushion,correlationFor:correlationForSuggestion,supportFor:supportForSuggestion,blocklist,
               onBlocked:rows=>{heldBack.push(...rows);},onDemoted,
@@ -803,26 +930,105 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           if(historyPick)suggestion=null;
           if(!suggestion && !geFull && !buysHeldForExits && url.searchParams.get('includeMarket')==='1') {
             const pushedFresh=pushedSuggestions.length && (Date.now()-pushedSuggestionsAt)<=MAX_PUSHED_AGE_MS;
-            let rank,rankWithoutMinimum;
+            // The scanner sends 20 rows with no buy limit and its own quantity. These two give the
+            // pushed tier the same footing as the market tier: a steady price to rank on, and the
+            // item catalogue to size from. Both fail open -- no archive or no mapping simply returns
+            // the tier to ranking on the scanner figures, exactly as before.
+            let pushedRankPrices=null;
             if(pushedFresh) {
-              rank=bl=>computePushedSuggestion(pushedSuggestions,{minProfit,blocklist:bl,maxSpend,volumes,targetDurationMinutes,...gates});
-              rankWithoutMinimum=bl=>computePushedSuggestion(pushedSuggestions,{minProfit:0,blocklist:bl,maxSpend,volumes,targetDurationMinutes,...gates});
-            } else {
+              try { pushedRankPrices=robustPrices(archive.recentHourly(Math.floor(Date.now()/3600000)*3600-ROBUST_PRICE_HOURS*3600)); } catch {}
+              try { await itemIndex(); } catch {}
+            }
+            const limitOf=id=>mappingCache.index?.get(id)?.limit;
+            const pushedOpts={maxSpend,volumes,targetDurationMinutes,rankPrices:pushedRankPrices,limitOf,rankBy:marketRankBy,...sizing,...gates};
+            let rank,rankAtMinimum,rankPushedOnly=null;
+            // The scanner's shortlist is a CANDIDATE SOURCE now, not a tier that takes precedence.
+            //
+            // It used to replace the market tier outright whenever the scanner had pushed in the last
+            // three minutes, so what a player saw depended on whether a browser tab happened to be
+            // open. Measured live at an 85m stack on 28 Sept 2026, with everything else identical:
+            // the pushed tier offered 11,000 Ruby bolts for 220,000 gp net on 2.9m committed, and the
+            // market tier ranking the whole catalogue offered 9 Blue Moon helms for 453,951 on 6.7m --
+            // about twice the profit and a bit over twice the capital. The scanner only ever sends its
+            // TOP 20 ROWS, chosen by its own browser-side score, so ranking those 20 well (which it
+            // now is) cannot make up for 1,721 rows never being considered.
+            //
+            // So both are ranked and the better of the two is kept, by the same `worthOf` measure and
+            // with the same "here is what was set aside" note as the "Best of both" comparison between
+            // the player's history and the market. The scanner keeps its real advantages -- price
+            // history, the player's own record, news matching -- and wins whenever they actually
+            // amount to a better trade, instead of winning by default.
+            if(pushedFresh)
+              rankPushedOnly=bl=>computePushedSuggestion(pushedSuggestions,{...pushedOpts,minProfit,blocklist:bl});
+            {
               const [,marketVolumes]=await Promise.all([
                 itemIndex(),
                 volumes?Promise.resolve(volumes):suggestionPrices.get('https://prices.runescape.wiki/api/v1/osrs/1h',60000).then(t=>JSON.parse(t).data||{}),
               ]);
-              rank=bl=>computeMarketSuggestion(mappingCache.list,latest,marketVolumes,{minProfit,blocklist:bl,maxSpend,targetDurationMinutes,maxStackShare,taxFreeOnly,...gates});
-              rankWithoutMinimum=bl=>computeMarketSuggestion(mappingCache.list,latest,marketVolumes,{minProfit:0,blocklist:bl,maxSpend,targetDurationMinutes,maxStackShare,taxFreeOnly,...gates});
+              // A steady price per item from the local archive, used to decide WHICH item wins rather
+              // than what it costs (see robustPrices). Null when the archive is off or too new, and
+              // the tier then ranks on `latest` exactly as it did before -- fail open, as ever.
+              let rankPrices=null;
+              try {
+                const hours=archive.recentHourly(Math.floor(Date.now()/3600000)*3600-ROBUST_PRICE_HOURS*3600);
+                rankPrices=robustPrices(hours);
+              } catch {}
+              const marketOpts={blocklist:undefined,maxSpend,targetDurationMinutes,maxStackShare,taxFreeOnly,rankPrices,rankBy:marketRankBy,...sizing,...gates};
+              rank=bl=>computeMarketSuggestion(mappingCache.list,latest,marketVolumes,{...marketOpts,minProfit,blocklist:bl});
+              // Both sources, at any floor, so the "how far would I have to come down" probe and the
+              // empty-case fallbacks stay consistent with what the real request would actually give.
+              const marketAt=(bl,mp)=>computeMarketSuggestion(mappingCache.list,latest,marketVolumes,{...marketOpts,minProfit:mp,blocklist:bl});
+              rankAtMinimum=(bl,mp)=>{
+                const m=marketAt(bl,mp);
+                if(!rankPushedOnly)return m;
+                const p=computePushedSuggestion(pushedSuggestions,{...pushedOpts,minProfit:mp,blocklist:bl});
+                if(!p)return m;
+                if(!m)return p;
+                // No await available here (the probe calls this synchronously), so the cheap
+                // comparison: the quoted margin. `worthOf` does the careful one on the real path.
+                const worth=s=>(s.sellPrice-estimateUnitTax(s.itemId,s.sellPrice)-s.buyPrice)*(s.quantity||1);
+                return worth(p)>=worth(m)?p:m;
+              };
             }
-            suggestion=await pickWithForecast({rank,forecastFor:forecastForSuggestion,policy:forecastPolicy,horizon:forecastHorizon,
-              cushionFor:cushionForSuggestion,requireCushion,correlationFor:correlationForSuggestion,supportFor:supportForSuggestion,blocklist,onBlocked:rows=>{heldBack.push(...rows);},onDemoted});
+            const checksFor={forecastFor:forecastForSuggestion,policy:forecastPolicy,horizon:forecastHorizon,
+              cushionFor:cushionForSuggestion,requireCushion,correlationFor:correlationForSuggestion,
+              supportFor:supportForSuggestion,onDemoted};
+            // Each pass gets its OWN blocklist copy: pickWithForecast adds to the set it is handed as
+            // it rejects candidates, so sharing one would let the first pass hide items from the
+            // second and make the comparison depend on which ran first.
+            const marketPick=await pickWithForecast({...checksFor,rank,blocklist:new Set(blocklist),
+              onBlocked:rows=>{heldBack.push(...rows);}});
+            const pushedPick=rankPushedOnly
+              ? await pickWithForecast({...checksFor,rank:rankPushedOnly,blocklist:new Set(blocklist),
+                  onBlocked:rows=>{heldBack.push(...rows);}})
+              : null;
+            if(!pushedPick) suggestion=marketPick;
+            else if(!marketPick) suggestion=pushedPick;
+            else {
+              const gp=n=>Math.round(n).toLocaleString('en-US');
+              const [scanner,wide]=await Promise.all([worthOf(pushedPick),worthOf(marketPick)]);
+              // Ties go to the scanner, which knows things the bridge does not -- the player's own
+              // record on that item, its price history and any news attached to it. Only a market
+              // pick that is genuinely worth more displaces it, and the loser is named either way.
+              if(scanner.value>=wide.value) {
+                suggestion=pushedPick;
+                if(marketPick.itemId!==pushedPick.itemId)heldBack.push({itemId:marketPick.itemId,
+                  reason:'A market-wide '+marketPick.name+' worth about '+gp(wide.value)
+                    +' gp, set aside for your scanner’s '+pushedPick.name+' at about '+gp(scanner.value)+' gp.'});
+              } else {
+                suggestion=marketPick;
+                if(marketPick.itemId!==pushedPick.itemId)heldBack.push({itemId:pushedPick.itemId,
+                  reason:'Your scanner’s '+pushedPick.name+' is worth about '+gp(scanner.value)
+                    +' gp at the price buyers are paying, against '+gp(wide.value)+' gp for a market-wide '
+                    +marketPick.name+', so EVI looked past the shortlist this time.'});
+              }
+            }
             // Say so when the reason the player's own history was passed over is the floor, not an
             // empty history. One extra ranking pass, only on the poll where that actually happened.
             if(suggestion&&!minProfitChosen) {
               try {
                 const ownBest=computeSuggestion([...state.flips,...state.importedFlips],latest,Date.now(),
-                  {minProfit:0,blocklist,risk,maxSpend,targetDurationMinutes,volumes,maxStackShare,...gates});
+                  {minProfit:0,blocklist,risk,maxSpend,targetDurationMinutes,volumes,maxStackShare,...sizing,...gates});
                 if(ownBest&&ownBest.itemId!==suggestion.itemId)fellThroughFromHistory={name:ownBest.name};
               } catch {}
             }
@@ -834,12 +1040,91 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
             // figure actually reachable. It runs only in the empty case, so the normal path is
             // unchanged, and it is a statement of what exists rather than a suggestion: it goes
             // through none of the checks and is never something EVI tells anyone to buy.
+            // Two faults found on 28 Sept 2026, both of which made this line understate what is
+            // available and so talk a player out of a setting they could actually have met.
+            //
+            // It ranked ONLY the market tier, because the ranking helpers live inside this market
+            // block and the personal tier is above it. At a 500k minimum it reported "Amethyst dart, 66,000" while the personal
+            // tier was holding a Twisted relic hunter (t3) worth 439,020 -- the same pick Auto was
+            // offering at that very moment. Six and a half times understated, and identical at every
+            // tier from 100k to 2m, which is what made it look like a fixed answer rather than a
+            // measurement. Both tiers are ranked now and the better of the two is reported.
+            //
+            // And it reported the QUOTED spread, the same fiction the headline used to. The Amethyst
+            // dart's 66,000 was really 34,223 at the price buyers were paying. This line exists to
+            // tell someone the truth about what is within reach, so it goes through `worthOf` -- the
+            // same reading, the same cache -- and reports the cautious figure, exactly as the headline
+            // now does. It is still a statement of what exists rather than a suggestion: it goes
+            // through none of the safety checks and is never something EVI tells anyone to buy.
             if(!suggestion && minProfit>0) {
               try {
-                const best=rankWithoutMinimum(blocklist);
-                const profit=best&&Number.isFinite(best.buyPrice)&&Number.isFinite(best.sellPrice)&&Number.isFinite(best.quantity)
-                  ?(best.sellPrice-estimateUnitTax(best.itemId,best.sellPrice)-best.buyPrice)*best.quantity:null;
-                if(Number.isFinite(profit)&&profit>0)reachable={name:best.name||null,itemId:best.itemId??null,profit:Math.round(profit)};
+                // Probed down the settings ladder rather than run once at no minimum, because the
+                // ranking is not ordered by profit and running it at zero answers a different question
+                // than the one asked. At a 500k minimum on 28 Sept this reported "Infinity bottoms,
+                // 82,046" -- the top-ranked pick once the floor was removed -- while the very same
+                // tier returned a Twisted relic hunter (t3) worth 439,020 at a 200k minimum. Both
+                // numbers were true; only the second answers "how far would I have to come down".
+                // Lowering the floor admits more candidates, and a newly admitted one can outrank what
+                // was already there, so the reported figure does not rise or fall monotonically as the
+                // floor drops and no single pass can be trusted to find the best rung.
+                //
+                // The rungs are MinProfitTier's own, so the answer is always a setting the player can
+                // actually pick, and only rungs below their current one are tried. Several ranking
+                // passes, but only on a poll that already found nothing, so the normal path is
+                // untouched. Still a statement of what exists: it goes through none of the safety
+                // checks and is never something EVI tells anyone to buy.
+                // Every rung goes through the SAME checks the real path runs, which is the whole
+                // point and was got wrong first time round. Reported by novi on 28 Sept 2026, three
+                // messages that contradicted one another: on Auto and on 200k it said "set it to
+                // 100,000 gp and the best this cash stack can do is 3rd Age robe, at about 441,621",
+                // and on 100,000 it said nothing passes and offered a Bronze arrow worth 812.
+                //
+                // Both were produced by this block, and the first was false. The probe ranked with
+                // computeSuggestion/rankAtMinimum directly, so it saw only the floor; the real path
+                // ranks through pickWithForecast, which then applies the forecast, cushion,
+                // correlation and sell-support checks. The robe cleared 100,000 on margin and was
+                // refused by a check, so the advice was to move a setting to reach a trade that would
+                // not have been offered there either.
+                //
+                // A line that exists to stop a player thinking EVI is broken must never send them to
+                // a setting that gives them nothing -- that is worse than saying nothing at all. It
+                // costs several full passes, but only on a poll that already found nothing, and it
+                // stops at the first rung that yields a trade. onBlocked/onDemoted are no-ops here so
+                // the probe cannot add to heldBack, which describes the real request.
+                const probeChecks={forecastFor:forecastForSuggestion,policy:forecastPolicy,horizon:forecastHorizon,
+                  cushionFor:cushionForSuggestion,requireCushion,correlationFor:correlationForSuggestion,
+                  supportFor:supportForSuggestion,blocklist,onBlocked:()=>{},onDemoted:()=>{}};
+                const rungs=[2000000,1000000,500000,200000,100000,1].filter(r=>r<minProfit);
+                for(const rung of rungs) {
+                  const candidates=[];
+                  if(wantSource!=='market') {
+                    try {
+                      const own=await pickWithForecast({...probeChecks,
+                        rank:bl=>computeSuggestion([...state.flips,...state.importedFlips],latest,Date.now(),
+                          {minProfit:rung,blocklist:bl,risk,maxSpend,targetDurationMinutes,volumes,maxStackShare,...sizing,...gates})});
+                      if(own)candidates.push(own);
+                    } catch {}
+                  }
+                  if(url.searchParams.get('includeMarket')==='1') {
+                    try {
+                      const m=await pickWithForecast({...probeChecks,rank:bl=>marketRankAt(bl,maxSpend,rung)});
+                      if(m)candidates.push(m);
+                    } catch {}
+                  }
+                  let best=null;
+                  for(const c of candidates) {
+                    if(!(Number.isFinite(c.buyPrice)&&Number.isFinite(c.sellPrice)&&Number.isFinite(c.quantity)))continue;
+                    const w=await worthOf(c);
+                    const profit=headlineProfit(Math.round(w.quoted),Number.isFinite(w.supported)?w.supported:null);
+                    // And it has to clear the rung it is being advertised at. A pick can pass the
+                    // ranking on its quoted margin and be worth less once sell-support is read, and
+                    // naming it under a setting its true figure cannot meet repeats the same lie in
+                    // a quieter voice.
+                    if(Number.isFinite(profit)&&profit>0&&profit>=rung&&(!best||profit>best.profit))
+                      best={name:c.name||null,itemId:c.itemId??null,profit,atMinimum:rung};
+                  }
+                  if(best){reachable=best;break;}
+                }
               } catch {}
             }
           }
@@ -862,6 +1147,119 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
                   +' gp at the price buyers are paying, against '+Math.round(market.value).toLocaleString('en-US')
                   +' gp for this market-wide pick, so EVI set your history aside this time.'});
               }
+            }
+          }
+          // Auto never goes silent. Reported by novi on 28 Sept 2026: at Auto and at every explicit
+          // tier EVI suggested nothing, and only "No minimum at all" produced anything -- "I think
+          // that option should be the auto option but actually look at what's possible."
+          //
+          // The fault was making the stack-scaled Auto floor a GATE. It was added earlier the same
+          // day for a real reason -- with 89m in hand EVI was offering trades worth 500 gp to 12k,
+          // and the instruction was that it should always look at the cash stack -- but on a large
+          // stack 0.1% can exceed everything the market currently has, and then the floor is not
+          // protecting anyone, it is just refusing to answer. A player who has expressed NO
+          // preference has not asked to be told nothing; they have asked EVI to decide.
+          //
+          // So under Auto the stack-scaled figure is a PREFERENCE, not a cutoff: it is tried first,
+          // and when nothing clears it EVI steps down and answers with the best trade that still
+          // passes every genuine safety check -- margin over tax, sell-support, fill history,
+          // correlation, the lot. Only the profit target moves; nothing protective is relaxed. An
+          // explicit tier the player chose stays a gate, because that is a decision rather than an
+          // absence of one.
+          //
+          // This also removes the trap that produced the report: if "No minimum at all" is the only
+          // setting that yields anything, players will use it -- and MinProfitTier.NONE switches off
+          // the margin-over-tax check too, so silence above it was pushing people to give up a real
+          // safety net to get any answer at all.
+          let steppedDownFrom=null;
+          if(!suggestion && !minProfitChosen && !geFull && !buysHeldForExits && minProfit>AUTO_MIN_PROFIT) {
+            const stepChecks={forecastFor:forecastForSuggestion,policy:forecastPolicy,horizon:forecastHorizon,
+              cushionFor:cushionForSuggestion,requireCushion,correlationFor:correlationForSuggestion,
+              supportFor:supportForSuggestion,blocklist,onBlocked:rows=>{heldBack.push(...rows);},onDemoted};
+            let stepped=null;
+            if(wantSource!=='market') {
+              try {
+                stepped=await pickWithForecast({...stepChecks,
+                  rank:bl=>computeSuggestion([...state.flips,...state.importedFlips],latest,Date.now(),
+                    {minProfit:AUTO_MIN_PROFIT,blocklist:bl,risk,maxSpend,targetDurationMinutes,volumes,maxStackShare,...sizing,...gates})});
+              } catch {}
+            }
+            if(!stepped&&url.searchParams.get('includeMarket')==='1') {
+              try { stepped=await pickWithForecast({...stepChecks,rank:bl=>marketRankAt(bl,maxSpend,AUTO_MIN_PROFIT)}); } catch {}
+            }
+            if(stepped) {
+              suggestion=stepped;
+              steppedDownFrom=minProfit;
+              // Said plainly on the pick itself, so the player knows this is the best available
+              // rather than a trade EVI rates as highly as usual. It rides the reasoning text, which
+              // every version of the plugin already shows, so no client change is needed for it.
+              const gp=n=>Math.round(n).toLocaleString('en-US');
+              suggestion.belowUsualBar=minProfit;
+              suggestion.reasoning=(suggestion.reasoning?suggestion.reasoning+' ':'')
+                +'Smaller than usual: nothing reached the '+gp(minProfit)
+                +' gp Auto is aiming for with this cash stack, so this is the best trade available'
+                +' right now. Every safety check still applies to it.';
+            }
+          }
+
+          // More than one position at a time, only when the player has asked for it.
+          //
+          // The default is 1 and at 1 not a line of this runs, so the single-suggestion path above is
+          // exactly what it was. novi's objection to the original "plan all eight slots" idea still
+          // governs the design and is worth restating: allocating a stack across eight trades divides
+          // the cash by eight, and an eighth-sized trade cannot make the profit they trade for. The
+          // only form they would accept was "up to N, where the player chooses N, defaulting to 1",
+          // and that is what this is.
+          //
+          // Why it exists at all, measured 28 Sept 2026: at an 89m stack the market tier's median
+          // suggestion commits about 3.6m, leaving the overwhelming majority idle, and no ranking
+          // change fixes that -- the median trade is roughly 600k gp whatever the ranking rule,
+          // because one order is held to about 4% of the volume that will trade in the player's
+          // window and tools/fill-by-size.mjs measured that cap's limit rather than guessing it. More
+          // capital can only be deployed through more positions, never through bigger ones.
+          //
+          // Nothing here is a split of the stack. Each further pick is ranked on the cash still
+          // UNSPENT after the ones before it and has to earn its place on its own merits: the same
+          // tiers, the same minimum profit, the same forecast, cushion, correlation and sell-support
+          // checks. When the remaining cash cannot buy anything that passes, the loop simply stops,
+          // which is the honest answer and the common one.
+          const wantPositions=positionsWanted(url.searchParams);
+          const additional=[];
+          if(suggestion&&wantPositions>1&&!geFull&&!buysHeldForExits) {
+            // A further buy may never take a slot the exits already owed are going to need, so the
+            // sell reserve is honoured here exactly as it is for the first pick -- and one slot is
+            // already spoken for by that first pick. An unknown free-slot count (the plugin sends
+            // none) falls back to the player's own ceiling rather than inventing capacity.
+            let slotsLeft=capacity.free===null
+              ?wantPositions-1
+              :Math.max(0,capacity.free-sellSlotsOwed-1);
+            let budget=maxSpend===undefined
+              ?undefined
+              :Math.max(0,maxSpend-(suggestion.buyPrice||0)*(suggestion.quantity||0));
+            let previous=suggestion;
+            while(additional.length<wantPositions-1&&slotsLeft>0) {
+              // The item just taken is now exposure, so the correlation check refuses a second
+              // position correlated with the first -- two slots in correlated items are one bet
+              // wearing two hats, which was novi's own objection. And it is blocked from being
+              // picked again, since the same item twice is one position, not two.
+              if(Number.isFinite(previous.itemId)) { exposure.add(previous.itemId); blocklist.add(previous.itemId); }
+              const spend=budget;
+              if(spend!==undefined&&!(spend>0))break;
+              const checks={forecastFor:forecastForSuggestion,policy:forecastPolicy,horizon:forecastHorizon,
+                cushionFor:cushionForSuggestion,requireCushion,correlationFor:correlationForSuggestion,
+                supportFor:supportForSuggestion,blocklist,onBlocked:()=>{},onDemoted:()=>{}};
+              let next=null;
+              if(wantSource!=='market')
+                next=await pickWithForecast({...checks,
+                  rank:bl=>computeSuggestion([...state.flips,...state.importedFlips],latest,Date.now(),
+                    {minProfit,blocklist:bl,risk,maxSpend:spend,targetDurationMinutes,volumes,maxStackShare,...gates})});
+              if(!next&&url.searchParams.get('includeMarket')==='1')
+                next=await pickWithForecast({...checks,rank:bl=>marketRankAt(bl,spend,minProfit)});
+              if(!next)break;
+              additional.push(next);
+              if(budget!==undefined)budget=Math.max(0,budget-(next.buyPrice||0)*(next.quantity||0));
+              slotsLeft--;
+              previous=next;
             }
           }
           // Independent of the ranked `suggestion` above: a plain live-market price for whatever
@@ -1012,7 +1410,8 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
               const c=crashWatch.isCrashing(itemId);
               if(!c||told.has(itemId))return;
               told.add(itemId);
-              crashNotes.push({itemId,name,message:crashMessage(c,{name,mine}),belowBreakEven:false});
+              crashNotes.push({itemId,name,message:crashMessage(c,{name,mine}),belowBreakEven:false,
+              level:'warn',label:'Crashing',figures:mine?'One of yours':'Watch before buying'});
             };
             for(const o of state.active.filter(o=>!account||o.account===account)) {
               const left=Math.max(0,o.total-o.filled);
@@ -1028,7 +1427,65 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // slots additionally carries the sell-side reserve, and heldBack names anything set aside
           // for a stated reason -- both so the sidebar can explain a missing suggestion instead of
           // falling back on "nothing passes your settings", which would be untrue here.
-          return send(200,{suggestion,openItemPrice,slotPrices,slotFill,relistAdvice:[...crashNotes,...sellNotes,...buyNotes,...relist],
+          // What EVI makes of its own pick, as something the sidebar can draw rather than prose to be
+          // read (see verdict.mjs). The reasoning is unchanged and still sent: this summarises it and
+          // invents nothing. Null when nothing was measured, which a panel reads as "no opinion" and
+          // falls back to the prose -- so an older bridge and a newer plugin still agree.
+          // Applied to the primary pick and, identically, to every additional one: an extra position
+          // gets the same verdict and the same cautious headline, or it would be the one card on the
+          // panel whose number nobody had checked.
+          const enrich=(s,stats)=>{
+          if(s) {
+            const suggestion=s;
+            // The fill-history reading was already computed for the log (thinStats, above). Carrying it
+            // onto the suggestion is what lets the card say "traded 312 of the last 335 hours" instead
+            // of that figure living only in a file nobody reads.
+            if(stats&&Number.isFinite(stats.hoursTraded)&&Number.isFinite(stats.hours))
+              suggestion.fillHistory={hoursTraded:stats.hoursTraded,hours:stats.hours};
+            const v=suggestionVerdict(suggestion);
+            if(v)suggestion.verdict=v;
+            // The panel should not have to know the tax rules to print the headline figure.
+            //
+            // The headline is the CAUTIOUS of two figures, not the quoted spread, whenever a
+            // sell-support reading exists. Measured 28 Sept 2026: an Ape atoll teleport (tablet) was
+            // headlined at 92,356 gp because the Wiki's `latest.high` of 28,756 was a single print --
+            // every hourly average that day sat between 6,000 and 6,300, and EVI's own sell-support
+            // had already read 1,115 buyers paying an average of 6,379, making the trade worth 4,641.
+            // Every downstream check behaved: the pick was demoted, the reasoning said so in full, and
+            // the verdict card read "Worth less than it looks". The one number a player actually acts
+            // on was still the one EVI itself did not believe -- and, worse, it was what the Auto stack
+            // floor got compared against, so a 92,356 fiction cleared an 89,000 floor that the true
+            // 4,641 could never have cleared. Never fabricate a number is the standing rule here.
+            //
+            // `implausibleSpread` does not catch this case and is not the place to: it requires that
+            // NOTHING traded in the hour, which is right for a stale print on a dead item, while this
+            // tablet trades about a hundred an hour. An outlier print in a liquid market needs the
+            // measured average, which sell-support already had.
+            //
+            // The LOWER of the two on purpose, rather than simply preferring the supported figure. The
+            // average buyers paid can sit above the player's own ask (an Ornate maul handle the same
+            // day quoted 2,474 and supported 9,865), and EVI must not headline a number that depends
+            // on selling higher than it is telling them to list. The quoted spread caps the promise;
+            // the supported reading caps the optimism. `quotedProfit` is kept beside it so nothing
+            // downstream loses the figure the spread implies.
+            if(Number.isFinite(suggestion.buyPrice)&&Number.isFinite(suggestion.sellPrice)) {
+              const q=suggestion.quantity>0?suggestion.quantity:1;
+              const quoted=Math.round(
+                (suggestion.sellPrice-suggestion.buyPrice-estimateUnitTax(suggestion.itemId,suggestion.sellPrice))*q);
+              const support=suggestion.sellSupport;
+              const supported=support&&Number.isFinite(support.netAtAverage)
+                ?Math.round(support.netAtAverage*q):null;
+              suggestion.quotedProfit=quoted;
+              suggestion.expectedProfit=headlineProfit(quoted,supported);
+            }
+          }
+          };
+          enrich(suggestion,thinStats);
+          // No thinStats for the extra picks: that reading is computed once, for the primary, and
+          // costs an archive pass each. They get every other check, and the panel shows no fill-history
+          // line for them rather than a figure borrowed from a different item.
+          for(const a of additional)enrich(a,null);
+          return send(200,{suggestion,additional,openItemPrice,slotPrices,slotFill,relistAdvice:[...crashNotes,...sellNotes,...buyNotes,...relist],
             slots:{...capacity,sellSlotsOwed,buysHeldForExits,positionItems},
             profit:profitSince(),
             reachable,
@@ -1288,6 +1745,28 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
         const p=readPreferences();
         return send(200,{...p,bulkMinLimit:BULK_MIN_LIMIT,
           blockedItems:p.blocked.map(id=>({itemId:id,name:mappingCache.index?.get(id)?.name||null}))});
+      }
+      // Each item's steady price -- the median of both sides over the last day of archived hours, the
+      // same reading the market tier ranks on (see robustPrices). Served so the scanner can show the
+      // cautious figure the sidebar now shows, instead of the quoted spread alone.
+      //
+      // Why the scanner needs a route rather than working it out itself: the honest figure the bridge
+      // puts on a single suggestion comes from sell-support, which fetches that item's 12-hour
+      // timeseries from the Wiki. The scanner ranks 1,741 rows at once, so per-row timeseries is not
+      // available to it at any price. The archive answers the same question -- what has this item
+      // steadily been worth, rather than what did one person last pay -- in one local pass.
+      //
+      // An empty object when the archive is off or too new, which the scanner reads as "no steady
+      // reading" and falls back to the quoted spread exactly as before. Cached for five minutes: it
+      // moves once an hour at most.
+      if(pathname==='/api/robust-prices') {
+        const now=Date.now();
+        if(!robustCache||now-robustCache.at>300000) {
+          let prices=null;
+          try { prices=robustPrices(archive.recentHourly(Math.floor(now/3600000)*3600-ROBUST_PRICE_HOURS*3600)); } catch {}
+          robustCache={at:now,prices:prices||{}};
+        }
+        return send(200,{hours:ROBUST_PRICE_HOURS,prices:robustCache.prices});
       }
       if(pathname==='/api/wealth') {
         const st=store.state();

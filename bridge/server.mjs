@@ -715,9 +715,10 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // it had been standing at 1,856 since 05:14. Lower than their ask, for something already on
           // the market. relist.mjs is what speaks about an offer that is not moving; this tier is only
           // for stock sitting in the bag with no offer behind it.
-          // Only an offer the plugin is still refreshing counts as being on the market -- see
-          // hasLiveSellOffer for the 30-ghosts-to-2-live measurement behind the window.
-          const listedForSale=itemId=>hasLiveSellOffer(store.offers.values(),itemId,account);
+          // state.active is the plugin's live snapshot of the eight GE slots. The journal is NOT the same
+          // thing: it had 64 offers still marked open while the plugin reported 8. See hasLiveSellOffer.
+          const state=store.state();
+          const listedForSale=itemId=>hasLiveSellOffer(state.active,itemId,account);
           const holdingOf=(...args)=>{
             const s=computeHoldingSuggestion(...args);
             if(!s)return null;
@@ -733,7 +734,6 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // covers a suggested or an unsuggested buy alike) so a position from an earlier session
           // still gets reminded about instead of silently forgotten. See pickPersistentOpenPosition
           // in suggestions.mjs.
-          const state=store.state();
           if(!suggestion && !geFull) {
             const openPosition=pickPersistentOpenPosition(state.autoOpenPositions,account,blocklist);
             if(openPosition) {

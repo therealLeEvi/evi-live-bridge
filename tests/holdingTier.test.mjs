@@ -51,32 +51,32 @@ test('no minimum set leaves the old behaviour exactly as it was', () => {
     assert.equal(holdingPreempts(pie(), none), true, 'with no minimum, every holding still pre-empts');
 });
 
-test('"still SELLING" in the journal is not the same as "on the market"', () => {
-  // The journal keeps an offer's state until the bridge sees it end, so one cancelled or collected
-  // while the bridge was down stays SELLING forever. On novi's journal, 28 Sept: 33 SELLING records,
-  // 2 genuinely live and 30 last refreshed over 24 hours earlier, across 29 distinct items -- against
-  // a Grand Exchange that allows eight offers in total. Treating all of those as "listed" would
-  // silence the holding reminder for 29 items they are not selling, the opposite of the intended fix.
-  const now = Date.UTC(2026, 8, 28, 12);
+test('what counts as "on the market" is the live slot snapshot, not the journal', () => {
+  // The journal keeps an offer's state until the bridge SEES it end, so anything cancelled or
+  // collected while the bridge was down stays SELLING for ever. On novi's journal, 28 Sept: 64 offers
+  // still marked open while the plugin was reporting 8 -- the Grand Exchange's entire capacity -- with
+  // 33 SELLING records over 29 distinct items whose last refresh was more than a day earlier, the
+  // oldest 343 hours. Reading those as "already listed" silences the holding reminder for 29 items the
+  // player is not selling, which is the opposite of the fault the check exists for.
+  //
+  // Store.state().active is the plugin's snapshot of the eight slots with finished offers dropped --
+  // the same source the wealth view already uses. An offer is in a slot or it is not; no staleness
+  // heuristic and no time window to defend.
   const me = 'acct-1';
-  const offer = (o = {}) => ({itemId: 22789, state: 'SELLING', account: me, updated: now - 1000, ...o});
+  const listed = {itemId: 22789, state: 'SELLING', account: me};
 
-  assert.equal(hasLiveSellOffer([offer()], 22789, me, {now}), true, 'refreshed a second ago: live');
-  assert.equal(hasLiveSellOffer([offer({updated: now - 4 * 60000})], 22789, me, {now}), true, '4 minutes: still live');
-  assert.equal(hasLiveSellOffer([offer({updated: now - 343 * 3600000})], 22789, me, {now}), false,
-    'the real ghost: last seen 343 hours ago');
-  assert.equal(hasLiveSellOffer([offer({updated: now - 25 * 3600000})], 22789, me, {now}), false);
+  assert.equal(hasLiveSellOffer([listed], 22789, me), true);
+  assert.equal(hasLiveSellOffer([], 22789, me), false, 'nothing in a slot: nothing is listed');
 
-  // Everything else that must not count as this item being on the market.
-  assert.equal(hasLiveSellOffer([offer({state: 'BUYING'})], 22789, me, {now}), false, 'a buy is not a listing');
-  assert.equal(hasLiveSellOffer([offer({state: 'SOLD'})], 22789, me, {now}), false);
-  assert.equal(hasLiveSellOffer([offer({account: 'someone-else'})], 22789, me, {now}), false, 'another account');
-  assert.equal(hasLiveSellOffer([offer({itemId: 999})], 22789, me, {now}), false);
-  assert.equal(hasLiveSellOffer([offer({updated: undefined})], 22789, me, {now}), false, 'no timestamp, no claim');
-  assert.equal(hasLiveSellOffer([], 22789, me, {now}), false);
-  assert.equal(hasLiveSellOffer(null, 22789, me, {now}), false);
-  assert.equal(hasLiveSellOffer([offer()], 22789, undefined, {now}), false, 'no account: cannot tell');
+  // Everything that must not count as this item being on the market.
+  assert.equal(hasLiveSellOffer([{...listed, state: 'BUYING'}], 22789, me), false, 'a buy is not a listing');
+  assert.equal(hasLiveSellOffer([{...listed, state: 'SOLD'}], 22789, me), false);
+  assert.equal(hasLiveSellOffer([{...listed, account: 'someone-else'}], 22789, me), false, 'another account');
+  assert.equal(hasLiveSellOffer([{...listed, itemId: 999}], 22789, me), false);
+  assert.equal(hasLiveSellOffer(null, 22789, me), false);
+  assert.equal(hasLiveSellOffer([listed], 22789, undefined), false, 'no account: cannot tell whose it is');
+  assert.equal(hasLiveSellOffer([listed], NaN, me), false);
 
-  // A ghost and a live offer for the same item: the live one wins.
-  assert.equal(hasLiveSellOffer([offer({updated: now - 300 * 3600000}), offer()], 22789, me, {now}), true);
+  // One of several slots, and junk in the list, are both handled.
+  assert.equal(hasLiveSellOffer([null, {itemId: 1, state: 'BUYING', account: me}, listed], 22789, me), true);
 });

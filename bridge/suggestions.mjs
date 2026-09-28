@@ -552,22 +552,25 @@ export function computeHoldingSuggestion(latestPrices, holdItemId, holdQty, hold
 
 // Is this item ACTUALLY on the market right now, as opposed to merely still marked SELLING?
 //
-// The journal keeps an offer's state until the bridge sees it end, so an offer cancelled or collected
-// while the bridge was down stays SELLING forever. Measured on novi's journal, 28 Sept 2026: **33
-// SELLING records, 2 genuinely live, 30 last refreshed over 24 hours earlier**, across 29 distinct
-// items -- against a Grand Exchange that allows eight offers in total. The plugin refreshes every live
-// offer on each poll, so a real one's `updated` is seconds old and a ghost's is hours or weeks.
+// Pass `Store.state().active`, which is the plugin's live snapshot of the eight Grand Exchange slots
+// with finished offers dropped -- the same source the wealth view and slot reasoning already use, and
+// the only one that answers this question.
 //
-// Five minutes is generous enough to survive a bridge restart or a slow poll, and still excludes a
-// 343-hour-old record. Without the window, treating "SELLING" as "listed" silences the holding
-// reminder for 29 items the player is not actually selling -- the opposite of the bug it was added for.
-export const LIVE_OFFER_WINDOW_MS = 5 * 60000;
-export function hasLiveSellOffer(offers, itemId, account, {now = Date.now(), windowMs = LIVE_OFFER_WINDOW_MS} = {}) {
-  if (!Number.isFinite(itemId) || !account || !offers) return false;
-  const fresh = now - windowMs;
-  for (const o of offers) {
-    if (!o || o.itemId !== itemId || o.state !== 'SELLING' || o.account !== account) continue;
-    if (Number.isFinite(o.updated) && o.updated >= fresh) return true;
+// The journal is NOT that source, and the difference is not small. It keeps an offer's state until the
+// bridge SEES it end, so anything cancelled or collected while the bridge was down stays SELLING for
+// ever. Measured on novi's journal, 28 Sept 2026: **64 offers still marked open, of which the plugin
+// was reporting 8** -- the GE's entire capacity -- with 33 SELLING records covering 29 distinct items
+// whose last refresh was over a day earlier, the oldest 343 hours. Reading those as "already listed"
+// silences the holding reminder for 29 items the player is not selling, which is the opposite of the
+// fault this check exists for.
+//
+// This first shipped scanning the journal and excluding anything not refreshed within five minutes.
+// That worked, but it was a staleness heuristic standing in for data the bridge already had, with a
+// window that would have needed defending. `active` needs no window: an offer is in a slot or it is not.
+export function hasLiveSellOffer(activeOffers, itemId, account) {
+  if (!Number.isFinite(itemId) || !account || !activeOffers) return false;
+  for (const o of activeOffers) {
+    if (o && o.itemId === itemId && o.state === 'SELLING' && o.account === account) return true;
   }
   return false;
 }

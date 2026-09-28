@@ -7,7 +7,7 @@ import {Store} from './store.mjs';
 import {createMarketCache} from './marketCache.mjs';
 import {createIconCache} from './icons.mjs';
 import {parseLog,buildOffers,flipsFrom,summarise,resolveLogFile} from './exchangeLog.mjs';
-import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_MULTIPLE,MARGIN_TAX_NO_HISTORY_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
+import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,holdingPreempts,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_MULTIPLE,MARGIN_TAX_NO_HISTORY_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
 import {estimateUnitTax} from './tax.mjs';
 import {createSuggestionLog,checksOf} from './suggestionLog.mjs';
 import {joinSuggestionOutcomes,summarizeOutcomes} from './suggestionOutcomes.mjs';
@@ -709,7 +709,27 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           const buysHeldForExits=capacity.free!==null&&!geFull&&capacity.free<=sellSlotsOwed;
           const holdBuyPriceParam=Number(url.searchParams.get('holdBuyPrice'));
           const holdBuyPrice=Number.isFinite(holdBuyPriceParam)&&holdBuyPriceParam>0?holdBuyPriceParam:undefined;
-          let suggestion=geFull?null:computeHoldingSuggestion(latest,Number(url.searchParams.get('holdItemId')),Number(url.searchParams.get('holdQty')),url.searchParams.get('holdName')||undefined,url.searchParams.get('holdBuyId')||undefined,holdBuyPrice);
+          // A position that is ALREADY listed is not waiting to be sold -- it is being sold. Reminding
+          // the player to sell it is advice they have taken, and on 28 Sept it was worse than useless:
+          // EVI offered to sell one Uncooked dragonfruit pie "near 1,689 gp" while their own offer for
+          // it had been standing at 1,856 since 05:14. Lower than their ask, for something already on
+          // the market. relist.mjs is what speaks about an offer that is not moving; this tier is only
+          // for stock sitting in the bag with no offer behind it.
+          const listedForSale=itemId=>{
+            if(!Number.isFinite(itemId)||!account)return false;
+            for(const o of store.offers.values())
+              if(o.itemId===itemId&&o.state==='SELLING'&&o.account===account)return true;
+            return false;
+          };
+          const holdingOf=(...args)=>{
+            const s=computeHoldingSuggestion(...args);
+            if(!s)return null;
+            if(listedForSale(s.itemId))return null;
+            // A trivial gain must not outrank the whole catalogue; a loss always speaks. See
+            // holdingPreempts, and the 205m-idle-versus-152-gp case behind it.
+            return holdingPreempts(s,minProfit)?s:null;
+          };
+          let suggestion=geFull?null:holdingOf(latest,Number(url.searchParams.get('holdItemId')),Number(url.searchParams.get('holdQty')),url.searchParams.get('holdName')||undefined,url.searchParams.get('holdBuyId')||undefined,holdBuyPrice);
           // The live signal above is necessarily empty right after a RuneLite/plugin restart --
           // it only refills by observing a fresh buy-collect this session. Falls back to the
           // bridge's own persistent, on-disk record of open positions (survives any restart,
@@ -720,7 +740,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           if(!suggestion && !geFull) {
             const openPosition=pickPersistentOpenPosition(state.autoOpenPositions,account,blocklist);
             if(openPosition) {
-              suggestion=computeHoldingSuggestion(latest,openPosition.itemId,openPosition.remaining,openPosition.item,openPosition.buyId,openPosition.unitCost);
+              suggestion=holdingOf(latest,openPosition.itemId,openPosition.remaining,openPosition.item,openPosition.buyId,openPosition.unitCost);
               // Marks this specifically as a reconstruction from the journal, not something the
               // plugin actually watched happen this session -- the plugin checks the player's real
               // current inventory before trusting it, and quietly excludes+retries (like a manual

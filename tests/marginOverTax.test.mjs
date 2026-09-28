@@ -7,7 +7,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {marginClearsTax, MARGIN_TAX_MULTIPLE, MARGIN_TAX_WARN_MULTIPLE,
-  computeSuggestion, computeMarketSuggestion, computePushedSuggestion, pickWithForecast} from '../bridge/suggestions.mjs';
+  computeSuggestion, computeMarketSuggestion, computePushedSuggestion, pickWithForecast,
+  implausibleSpread, IMPLAUSIBLE_MARGIN_MULTIPLE} from '../bridge/suggestions.mjs';
 import {estimateUnitTax} from '../bridge/tax.mjs';
 
 test('marginClearsTax: the bar is the item\'s own tax, and unknowns never block', () => {
@@ -101,6 +102,42 @@ test('a margin under the tax at the SUPPORTED price is held back, never shown as
   assert.ok(weak, 'a warning still leaves something on screen');
   assert.equal(weak.demoted, true);
   assert.match(weak.reasoning, /No other candidate passed this check/);
+});
+
+test('implausibleSpread: a margin too good to be true, on something nobody is trading', () => {
+  // EVI offered to buy 1,301 Rune dart(p++) at 10 gp to sell at 874 -- an 8,470% margin -- where the
+  // 10 gp was a single print from ten hours earlier, against a 24-hour average sell of 357, with
+  // nothing traded in the intervening hour. Every other check here asks whether a margin is too THIN.
+  assert.equal(IMPLAUSIBLE_MARGIN_MULTIPLE, 5);
+  assert.equal(implausibleSpread(847, 10, null), true, 'the real case: 85x margin, nothing traded');
+  assert.equal(implausibleSpread(847, 10, 0), true, 'an explicit zero reads the same as absence here');
+
+  // The half that keeps it honest: someone trading it means the spread is real enough to judge by the
+  // other checks. Cheap items carry huge percentage margins legitimately and that band is protected --
+  // a 1 gp item selling at 3 is a 200% margin and a perfectly good small-stack flip.
+  assert.equal(implausibleSpread(847, 10, 40), false, 'traded this hour: not this check\'s business');
+  assert.equal(implausibleSpread(84, 10, 4), false, 'a cheap liquid flip at 840% stays');
+  assert.equal(implausibleSpread(2, 1, 500), false);
+  assert.equal(implausibleSpread(127057, 2268726, 3), false, 'an ordinary flip is nowhere near');
+  assert.equal(implausibleSpread(40, 10, null), false, 'untraded but only 4x: under the bar');
+
+  // Fails open on anything it cannot judge, the standing rule.
+  for (const bad of [[undefined, 10, null], [847, 0, null], [847, -1, null], [-5, 10, null], [NaN, 10, null], [847, NaN, null]])
+    assert.equal(implausibleSpread(...bad), false, JSON.stringify(bad));
+});
+
+test('the dart is refused by the tier that used to offer it', () => {
+  // The personal tier deliberately does not drop stale prices -- "an old last-trade is context" -- so
+  // nothing else here would have caught this one.
+  const flips = [{itemId: 5641, item: 'Rune dart(p++)', quantity: 1301, capital: 13010,
+    netProceeds: 200000, profit: 186990, firstBuy: 1, lastSell: 2, hold: 1}];
+  const stale = {'5641': {high: 874, low: 10, highTime: 1, lowTime: 1}};
+  const noTrades = {};                      // the Wiki omits an item entirely when nothing traded
+  assert.equal(computeSuggestion(flips, stale, Date.now(), {volumes: noTrades, maxSpend: 205_516_281}), null);
+  // The same item, same prices, once it is actually trading: judged on its merits again.
+  const trading = {'5641': {highPriceVolume: 900, lowPriceVolume: 700}};
+  const s = computeSuggestion(flips, stale, Date.now(), {volumes: trading, maxSpend: 205_516_281});
+  assert.ok(s && s.itemId === 5641, 'liquidity is what makes the spread judgeable, not the ratio alone');
 });
 
 test('a scanner-pushed pick is held to the same bar', () => {

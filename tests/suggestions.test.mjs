@@ -1103,9 +1103,22 @@ test("sizing: how much of an hour's trading one order may be depends on how long
   assert.equal(volumeShareForDuration(30), 0.10);
   assert.equal(volumeShareForDuration(5 * 60), 0.10, 'under six hours keeps the tight cap');
   assert.equal(volumeShareForDuration(6 * 60), 0.25);
-  assert.equal(volumeShareForDuration(12 * 60), 0.50);
-  assert.equal(volumeShareForDuration(24 * 60), 0.50, "never past half an hour's volume on this evidence");
+  assert.equal(volumeShareForDuration(12 * 60), 0.50, 'the one measured point, unchanged');
   assert.equal(volumeShareForDuration(0), 0.10);
+
+  // Past twelve hours it now continues instead of stopping. It used to return 0.50 for any longer
+  // duration, with the note "never past half an hour's volume on this evidence" -- but the ladder had
+  // simply never been extended when TradePace added Overnight and Slow on 26 Sept. On the Slow pace
+  // that left the market-wide tier with nothing to suggest at all against a 1m minimum, since every
+  // liquid item was sized to a handful of units. 0.25 at six hours and 0.50 at twelve are both exactly
+  // hours/24, so this is the same rule continued, not a new one.
+  assert.equal(volumeShareForDuration(24 * 60), 1.00, 'a full day may be twice a twelve-hour order');
+  assert.equal(volumeShareForDuration(48 * 60), 2.00, "Slow's two days");
+  // Everything at or below twelve hours is untouched: making a short trade more permissive would be
+  // extrapolating the risky way with nothing behind it.
+  assert.equal(volumeShareForDuration(11 * 60), 0.25);
+  assert.equal(volumeShareForDuration(7 * 60), 0.25);
+  assert.equal(volumeShareForDuration(2 * 60), 0.10);
 });
 
 test('sizing: a twelve-hour trade may be five times the order a one-hour trade may be', () => {

@@ -9,20 +9,51 @@ const offer=(o={})=>({itemId:1,name:'Test item',price:13000,remaining:5,firstSee
 const prices=(sell=12500)=>({'1':{itemId:1,buyPrice:sell-500,sellPrice:sell}});
 const cost=(paid=12000)=>new Map([[1,paid]]);
 
+// A gap under DRIFT_SPEAKS_NOW, so only the clock can make it speak. 13,000 against 12,900 is 0.77%:
+// above MIN_GAP, so it is worth saying eventually, but not far enough to bypass the wait.
+const nearMarket=()=>prices(12900);
+
 test('an offer that has not waited long enough is left alone',()=>{
-  const fresh=relistAdvice({offers:[offer({firstSeen:hoursAgo(1)})],prices:prices(),costBasis:cost(),targetDurationMinutes:1440,now:NOW});
+  const fresh=relistAdvice({offers:[offer({firstSeen:hoursAgo(1)})],prices:nearMarket(),costBasis:cost(),targetDurationMinutes:1440,now:NOW});
   assert.equal(fresh.length,0,'1 hour into a 24-hour target is far too early');
-  const waited=relistAdvice({offers:[offer({firstSeen:hoursAgo(7)})],prices:prices(),costBasis:cost(),targetDurationMinutes:1440,now:NOW});
+  const waited=relistAdvice({offers:[offer({firstSeen:hoursAgo(7)})],prices:nearMarket(),costBasis:cost(),targetDurationMinutes:1440,now:NOW});
   assert.equal(waited.length,1,'past a quarter of the window it speaks');
 });
 
+test('a market that has moved away speaks without waiting out the clock',()=>{
+  // The gap this closes: the wait is a share of the player's pace, so on Slow (~2 days) a quarter of
+  // it is twelve hours of silence however far the price runs. Measured on 316 of novi's own sell
+  // offers, an ask more than 1% over the going rate took six to seven hours to sell and a third to a
+  // half never sold at all -- so at that point waiting is the wrong advice, not the cautious one.
+  const drifted=[offer({firstSeen:hoursAgo(1)})];            // 13,000 against 12,500 is 3.85%
+  const out=relistAdvice({offers:drifted,prices:prices(),costBasis:cost(),targetDurationMinutes:2880,now:NOW});
+  assert.equal(out.length,1,'2 days of pace would otherwise mean 12 hours of silence');
+  assert.match(out[0].message,/market has moved away from your ask/);
+  assert.match(out[0].message,/3\.8% below it/);
+  assert.ok(!/after 1 hour/.test(out[0].message),'it leads with the market, not with impatience');
+
+  // Still not instantly: placing an offer must not be second-guessed on the spot. An ask within 1% of
+  // the market typically fills in 6 to 24 minutes, so fifteen is where standing still becomes news.
+  assert.equal(relistAdvice({offers:[offer({firstSeen:NOW-5*60000})],prices:prices(),costBasis:cost(),targetDurationMinutes:2880,now:NOW}).length,0);
+  assert.equal(relistAdvice({offers:[offer({firstSeen:NOW-20*60000})],prices:prices(),costBasis:cost(),targetDurationMinutes:2880,now:NOW}).length,1);
+
+  // Above 5% the plugin's own offerDriftHint says it, so the early path stays quiet rather than
+  // putting two sentences about one offer in the sidebar. The clock still applies to it as before.
+  const wide=[offer({price:14000,firstSeen:hoursAgo(1)})];   // 14,000 against 12,500 is 10.7%
+  assert.equal(relistAdvice({offers:wide,prices:prices(),costBasis:cost(),targetDurationMinutes:2880,now:NOW}).length,0,
+    'the plugin is already speaking at this drift');
+  assert.equal(relistAdvice({offers:[offer({price:14000,firstSeen:hoursAgo(13)})],prices:prices(),costBasis:cost(),targetDurationMinutes:2880,now:NOW}).length,1,
+    'once the ordinary wait elapses it speaks as it always did');
+});
+
 test('the wait scales with the player\'s own trade duration, with a floor',()=>{
+  // Measured against a near-market ask, so the drift path cannot fire and only the clock is on test.
   const o=[offer({firstSeen:hoursAgo(1)})];
   // A 2-hour trader hears after 30 minutes; a 24-hour trader does not.
-  assert.equal(relistAdvice({offers:o,prices:prices(),costBasis:cost(),targetDurationMinutes:120,now:NOW}).length,1);
-  assert.equal(relistAdvice({offers:o,prices:prices(),costBasis:cost(),targetDurationMinutes:1440,now:NOW}).length,0);
+  assert.equal(relistAdvice({offers:o,prices:nearMarket(),costBasis:cost(),targetDurationMinutes:120,now:NOW}).length,1);
+  assert.equal(relistAdvice({offers:o,prices:nearMarket(),costBasis:cost(),targetDurationMinutes:1440,now:NOW}).length,0);
   // Never sooner than the minimum wait, however short the target.
-  assert.equal(relistAdvice({offers:[offer({firstSeen:NOW-10*60000})],prices:prices(),costBasis:cost(),targetDurationMinutes:5,now:NOW}).length,0);
+  assert.equal(relistAdvice({offers:[offer({firstSeen:NOW-10*60000})],prices:nearMarket(),costBasis:cost(),targetDurationMinutes:5,now:NOW}).length,0);
   assert.ok(MIN_WAIT_MINUTES>0&&RELIST_AFTER_SHARE>0);
 });
 

@@ -327,6 +327,10 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
     // margin on it survive a one gp tick.
     if (options.requireMarginOverTax !== false
         && !marginClearsTax(net, tax, options.marginTaxMultiple ?? MARGIN_TAX_MULTIPLE)) continue;
+    // A margin too good to be true, on something nobody is trading (see implausibleSpread). This tier
+    // does not drop stale prices -- an old last-trade is context here -- which is exactly how a ten-hour
+    // old 10 gp print on Rune dart(p++) became a suggestion to buy 1,301 of them.
+    if (implausibleSpread(net, p.low, volumeReadingFor(options.volumes, h.itemId))) continue;
     let quantity = Math.max(1, Math.round(h.medianQty));
     let cashLimited = false;
     if (maxSpend !== undefined) {
@@ -510,13 +514,14 @@ export function computeHoldingSuggestion(latestPrices, holdItemId, holdQty, hold
   if (!p || !(p.low > 0) || !(p.high > 0)) return null;
   const name = holdName || `item ${holdItemId}`;
   let reasoning = `You're holding ${holdQty.toLocaleString('en-US')} ${name} from an earlier buy that hasn't been resold yet -- sell near ${p.high.toLocaleString('en-US')} gp before starting anything new.`;
-  let breakEvenPrice = null, lossIfSoldNow = null;
+  let breakEvenPrice = null, lossIfSoldNow = null, netIfSoldNow = null;
   if (Number.isFinite(holdBuyPrice) && holdBuyPrice > 0) {
     const tax = estimateUnitTax(holdItemId, p.high);
     const netPerUnit = p.high - holdBuyPrice - tax;
     const totalNet = Math.round(netPerUnit * holdQty);
     breakEvenPrice = breakEvenSellPrice(holdItemId, holdBuyPrice);
     const breakEvenText = breakEvenPrice ? ` Break-even after tax: ${breakEvenPrice.toLocaleString('en-US')} gp.` : '';
+    netIfSoldNow = totalNet;
     if (netPerUnit < 0) lossIfSoldNow = Math.abs(totalNet);
     reasoning = netPerUnit >= 0
       ? `You're holding ${holdQty.toLocaleString('en-US')} ${name} bought at ${holdBuyPrice.toLocaleString('en-US')} gp -- selling near ${p.high.toLocaleString('en-US')} gp now would net about +${totalNet.toLocaleString('en-US')} gp.${breakEvenText}`
@@ -538,7 +543,32 @@ export function computeHoldingSuggestion(latestPrices, holdItemId, holdQty, hold
     // null when the real cost basis isn't known -- never estimated.
     breakEvenPrice,
     lossIfSoldNow,
+    // What closing this position out is actually worth, total and after tax: positive for a gain,
+    // negative for a loss, null when the cost basis is unknown. Returned so the caller can judge
+    // whether it deserves to pre-empt a real trade -- see holdingPreempts.
+    netIfSoldNow,
   };
+}
+
+// Should a holding reminder take the place of a ranked suggestion?
+//
+// It always used to, unconditionally, and that is right for the case it was built for: closing out a
+// position you already opened beats being pointed at a brand-new one. But it has no sense of scale.
+// On 28 Sept 2026, with 205m idle and a 1,000,000 gp minimum set, EVI's answer was to sell one
+// Uncooked dragonfruit pie for **152 gp** -- a leftover single unit outranking the entire catalogue.
+//
+// So: a LOSS always speaks, whatever it is worth, because warn-don't-block is the standing rule here
+// and the player needs to know. An unknown value always speaks too, since staying quiet about a
+// position because its cost basis is missing would be the wrong way round. What steps aside is a
+// merely trivial GAIN -- below the minimum the player set for being shown a trade at all. It is not
+// suppressed, only stopped from pre-empting: the ranking runs, and the sidebar's own held-stock
+// lines still name the position.
+export function holdingPreempts(suggestion, minProfit) {
+  if (!suggestion) return false;
+  if (!Number.isFinite(suggestion.netIfSoldNow)) return true;   // unknown worth: say it anyway
+  if (suggestion.netIfSoldNow < 0) return true;                 // a loss is always worth saying
+  if (!Number.isFinite(minProfit) || minProfit <= 0) return true;
+  return suggestion.netIfSoldNow >= minProfit;
 }
 
 // The lowest whole sell price per unit at which selling nets at least unitCost after GE tax --
@@ -719,9 +749,38 @@ const DEFAULT_MAX_VOLUME_SHARE = 0.10;
 // evidence supports "about the same up to 50% if you will wait half a day", not a precise curve.
 // These are upper bounds -- orders were often cancelled BECAUSE they looked slow -- so the steps stay
 // conservative, and the 10% floor is kept for anyone who has not set a duration at all.
+// How much of an item's HOURLY volume one order may be, given how long the player will wait for it.
+//
+// This was a three-step ladder -- 10% under six hours, 25% at six, 50% at twelve -- and it stopped
+// there, because twelve hours was the longest trade duration that existed when it was written. On
+// 26 Sept 2026 TradePace added Overnight (~12h) and Slow (~2 days) and this was not extended with it.
+// The consequence showed up on 28 Sept: on the Slow pace, with 205m idle and a 1,000,000 gp minimum,
+// the market-wide tier had **nothing at all** to suggest -- its best pick in the entire catalogue was
+// 5,594 Adamant arrows for 5,594 gp -- because every liquid item was sized to a handful of units. A
+// blowpipe ornament kit trading 66 units a day was capped at one. Raising the cap to 1x turns that
+// same moment into a 2.06m trade, so the cap, not the ranking, was the whole problem.
+//
+// The ladder was never really three steps: 0.25 at six hours and 0.50 at twelve are both exactly
+// 4.17% of what the item trades during the window, which is `hours / 24`. So this is the same rule
+// it always was, continued past the point where it stopped. Every value the old ladder produced is
+// reproduced exactly -- 6h -> 0.25, 12h -> 0.50 -- and only the paces it never covered are new:
+// 24h -> 1.00, and Slow's two days -> 2.00.
+//
+// The floor stays at DEFAULT_MAX_VOLUME_SHARE so a very short pace is no more permissive than before.
+//
+// **This is an extrapolation, not a measurement, and the difference matters.** The one measured point
+// is tools/fill-by-size.mjs: at a TWELVE-hour horizon an order up to 50% of hourly volume filled about
+// as often as a small one. Re-running it at a 48-hour horizon returns byte-identical numbers, because
+// nearly every large order in this journal was cancelled within minutes -- 52 of the 61 largest -- so
+// there is nothing left standing to observe and the counterfactual has never been run. Leaving a large
+// order up for a full two days a few times is the experiment that would confirm or refute this.
+// Only the region past twelve hours changes. Below it the old steps are kept exactly, because making
+// a five-hour trade more permissive would be extrapolating in the risky direction with nothing behind
+// it -- the measured point is at twelve hours and the steps under it were deliberately conservative.
+const VOLUME_SHARE_PER_HOUR = 1 / 24;
 export function volumeShareForDuration(targetDurationMinutes) {
   if (!Number.isFinite(targetDurationMinutes) || targetDurationMinutes <= 0) return DEFAULT_MAX_VOLUME_SHARE;
-  if (targetDurationMinutes >= 12 * 60) return 0.50;
+  if (targetDurationMinutes >= 12 * 60) return (targetDurationMinutes / 60) * VOLUME_SHARE_PER_HOUR;
   if (targetDurationMinutes >= 6 * 60) return 0.25;
   return DEFAULT_MAX_VOLUME_SHARE;
 }
@@ -792,6 +851,9 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     // stricter no-history bar -- there is no track record here to earn the benefit of the doubt.
     if (options.requireMarginOverTax !== false
         && !marginClearsTax(net, tax, options.marginTaxMultiple ?? MARGIN_TAX_NO_HISTORY_MULTIPLE)) continue;
+    // Belt and braces: MIN_HOURLY_VOLUME should already have excluded anything untraded here, but the
+    // same reading is cheap and this tier must never be the one that offers a dead spread.
+    if (implausibleSpread(net, p.low, volumeReadingFor(volumes, item.id))) continue;
     // The item's own GE buy limit when known (see DEFAULT_MARKET_QUANTITY_CAP above), else the cap.
     const limitKnown = Number.isFinite(item.limit) && item.limit > 0;
     // One limit per four-hour window the player's duration spans (see limitAllowance); the account's
@@ -1113,6 +1175,41 @@ export const MARGIN_CUSHION_MULTIPLIER = 1;
 // still switches it off entirely, the same escape hatch the Auto floor has.
 // The bar for a tier that has the player's own track record on the item behind it. Half the tax is
 // where the measured lower quartile turns positive, so an ordinary bad draw no longer loses GP.
+// A margin can be too GOOD to be true, and that is a data-quality signal rather than an opportunity.
+//
+// On 28 September 2026 EVI offered to buy 1,301 Rune dart(p++) at **10 gp** to sell at 874 -- an 8,470%
+// margin. The 10 gp was a single print from ten hours earlier, against a 24-hour average sell price of
+// 357, with nothing traded at all in the intervening hour. Nobody would have sold at 10, so the offer
+// would simply have sat there, holding a slot and displacing a real trade. None of the existing checks
+// looked at it: every one of them tests whether a margin is too THIN.
+//
+// A ratio alone is the wrong test, because cheap items genuinely carry huge percentage margins and
+// that band is deliberately protected -- a 1 gp item selling at 3 is a 200% margin and perfectly real.
+// What separates the two is whether anyone is trading it. Measured across the 2,779 items showing a
+// positive after-tax spread on 28 Sept: the median margin is 17% of the buy price, the 90th percentile
+// 476%, and the extreme tail is entirely dead stock -- the top eight all traded 0 or 1 units in a day,
+// led by an Adamant hasta(p) quoting buy 1 / sell 4,912 on no volume whatsoever.
+//
+// So the test is both together: an extreme margin AND nothing traded this hour. At 5x that drops 8.0%
+// of items, whose median 24-hour volume is 2, while keeping 59 cheap liquid items carrying margins
+// above 100%. The 8% matches what the 500 gp Auto floor cost when it was accepted on the same standard.
+//
+// Absence of a volume reading is treated as "did not trade", not as "unknown", and only here: the Wiki
+// omits an item from its hourly endpoint entirely when nothing changed hands, which is exactly the
+// signal wanted. Sizing still treats absence as unknown (see volumeReadingFor), because there the
+// fail-open rule is the right one.
+export const IMPLAUSIBLE_MARGIN_MULTIPLE = 5;
+
+// Pure decision. net: the per-unit margin after tax. buyPrice: what EVI would bid. hourVolume: units
+// traded this hour, or null when the item is absent from the hourly data. Returns true only for a
+// margin that is both extreme and unsupported by any trading at all; anything it cannot judge -- a
+// missing price, a non-positive margin, or an item that did trade -- is never rejected here.
+export function implausibleSpread(net, buyPrice, hourVolume, multiple = IMPLAUSIBLE_MARGIN_MULTIPLE) {
+  if (!Number.isFinite(net) || !Number.isFinite(buyPrice) || buyPrice <= 0 || net <= 0) return false;
+  if (hourVolume > 0) return false;          // someone is trading it: the spread is real enough to test
+  return net / buyPrice > multiple;
+}
+
 export const MARGIN_TAX_MULTIPLE = 0.5;
 
 // The bar for a tier with NO track record -- the market-wide and scanner-pushed tiers, which is what

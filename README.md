@@ -37,15 +37,17 @@ anywhere.
 npm test
 ```
 
-runs the test suite (380 tests as of this writing).
+runs the test suite.
 
 ## What it does
 
 - **Keeps a journal of your own Grand Exchange offers**, exactly as the plugin observed them, and
   matches buys to sales automatically to work out realised profit after Grand Exchange tax.
-- **Suggests what to trade next**, ranked from your own reviewed trade history first, and optionally
-  from the whole item catalogue when your history has nothing eligible. Every suggestion is sized
-  against your actual cash, the item's 4-hour buy limit, and how long you want a trade to take.
+- **Suggests what to trade next**, from your own trade history, from the whole item catalogue, or from
+  the better of the two — your choice, in the plugin's *Suggest from* setting. Ranking uses what an
+  item has been steadily worth over the last two weeks rather than its last couple of trade prints.
+  Every suggestion is sized against your actual cash, the item's 4-hour buy limit, how much of it
+  actually trades in the window you chose, and how long you want a trade to take.
 - **Refuses trades whose edge is thinner than their own tax.** A margin the Grand Exchange's tax would
   eat is not offered, judged both on the quoted spread and on what buyers have actually been paying
   over the last 12 hours. The bar is the item's own tax, so it scales with the price, and tax-free

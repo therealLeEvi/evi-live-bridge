@@ -232,3 +232,45 @@ test('a pushed pick that IS cut by the volume cap still renders its note', async
   assert.ok(perWindow.quantity < 5000);
   assert.match(perWindow.reasoning, /over your whole trade window/, 'the window rule names itself: ' + perWindow.reasoning);
 });
+
+test('a buy price that disagrees with its own hour is a print, not a price', async () => {
+  // Found live on 29 Sept 2026: EVI offered 2,000 Divine super defence potion(4) at 299 to sell at
+  // 5,177 -- a headline of nearly 10m gp. The item trades around 5,000-5,500, and its own hour
+  // averaged 2,984 across 1,898 real trades. The 299 was one print at a tenth of what everyone else
+  // in that hour got, and every check downstream took it on trust: the robust gate judged the ITEM
+  // and rightly passed it, implausibleSpread needs an empty hour and this was the busiest in a
+  // fortnight, and headlineProfit's two inputs both subtracted the same bogus 299.
+  const {implausibleBuyPrint, BUY_PRINT_MULTIPLE} = await import('../bridge/suggestions.mjs');
+  assert.equal(BUY_PRINT_MULTIPLE, 0.5);
+
+  // The case itself: 299 against an hour that averaged 2,984 over 1,898 trades.
+  assert.equal(implausibleBuyPrint(299, {avgLowPrice: 2984, lowPriceVolume: 1898}), true);
+
+  // An ordinary print is at or near its hour's average -- the median across 2,496 items was 1.000x,
+  // and the 10th percentile 0.954x, so normal trading must never trip this.
+  assert.equal(implausibleBuyPrint(2984, {avgLowPrice: 2984, lowPriceVolume: 1898}), false);
+  assert.equal(implausibleBuyPrint(2847, {avgLowPrice: 2984, lowPriceVolume: 1898}), false, '0.954x, the 10th pct');
+  assert.equal(implausibleBuyPrint(1510, {avgLowPrice: 2984, lowPriceVolume: 1898}), false, '0.506x, the 1st pct, still allowed');
+
+  // Nothing to judge against is not evidence. No average, or an hour with no trades on that side,
+  // must fail OPEN -- the same rule every other check here follows.
+  assert.equal(implausibleBuyPrint(299, {avgLowPrice: 0, lowPriceVolume: 1898}), false, 'no average');
+  assert.equal(implausibleBuyPrint(299, {avgLowPrice: 2984, lowPriceVolume: 0}), false, 'nothing traded to average');
+  assert.equal(implausibleBuyPrint(299, undefined), false, 'no reading at all');
+  assert.equal(implausibleBuyPrint(0, {avgLowPrice: 2984, lowPriceVolume: 1898}), false, 'no price');
+
+  // A genuine sustained decline must survive. This is why the test is against the SAME HOUR rather
+  // than the 14-day median: an item that crashed a week ago sits far below its fortnight median quite
+  // legitimately, and dropping it for that would be wrong.
+  assert.equal(implausibleBuyPrint(1000, {avgLowPrice: 1010, lowPriceVolume: 400}), false,
+    'down 80% from its fortnight median, but trading consistently at the new level');
+
+  // And end to end: the market tier must not offer it.
+  const {computeMarketSuggestion} = await import('../bridge/suggestions.mjs');
+  const items = [{id: 23721, name: 'Divine super defence potion(4)', limit: 2000, members: true}];
+  const now = Date.now();
+  const prices = {'23721': {high: 5177, low: 299, highTime: now / 1000, lowTime: now / 1000}};
+  const vols = {'23721': {highPriceVolume: 1604, lowPriceVolume: 1898, avgHighPrice: 6266, avgLowPrice: 2984}};
+  assert.equal(computeMarketSuggestion(items, prices, vols, {maxSpend: 50_000_000, targetDurationMinutes: 720, now}),
+    null, 'the market tier must refuse a candidate whose buy price is a print');
+});

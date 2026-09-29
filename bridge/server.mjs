@@ -10,6 +10,7 @@ import {parseLog,buildOffers,flipsFrom,summarise,resolveLogFile} from './exchang
 import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,holdingPreempts,hasLiveSellOffer,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_MULTIPLE,MARGIN_TAX_NO_HISTORY_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,robustPrices,ROBUST_PRICE_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
 import {estimateUnitTax} from './tax.mjs';
 import {createSuggestionLog,checksOf} from './suggestionLog.mjs';
+import {createAcceptances} from './acceptances.mjs';
 import {joinSuggestionOutcomes,summarizeOutcomes} from './suggestionOutcomes.mjs';
 import {tradingPeriods} from './tradingPeriods.mjs';
 import {createPriceArchive,readArchive} from './priceArchive.mjs';
@@ -208,7 +209,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
     log:m=>console.error(m),
     record:e=>{try{fs.appendFileSync(crashLogFile,JSON.stringify(e)+'\n');}catch{}},
   });
-  const suggestionLog=createSuggestionLog(dir),archive=createPriceArchive({dir,log:m=>console.error(m),
+  const suggestionLog=createSuggestionLog(dir),acceptances=createAcceptances(dir),archive=createPriceArchive({dir,log:m=>console.error(m),
     onStored:(step,bucket)=>{if(step==='5m'&&bucket.ts>=Date.now()/1000-45*60)crashWatch.addFiveMinute(bucket);}});
   // News-to-item linkage (see newsChains.mjs / newsChain.mjs). Reads the mapping and volume caches
   // this server already keeps, so it costs no extra price fetches -- only wiki lookups, which are
@@ -364,8 +365,40 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
   // because the scanner asks without naming one -- looking up its own empty key was why the goal
   // reported an unknown coin count while the player was logged in.
   const lastCash=new Map();
-  // The steady-price reading served to the scanner, rebuilt at most every five minutes.
+  // The steady-price reading, built once and shared by every consumer: the suggestion path, the
+  // pushed tier, and the scanner route.
+  //
+  // It has to be cached, and it has to come from readArchive. Both were measured on 29 Sept 2026,
+  // when the window widened from 24 hours to two weeks:
+  //   * archive.recentHourly() keeps only RECENT_HOURS (26) buckets in memory, so it cannot reach
+  //     back two weeks at all. It would quietly return a day of data and look like it had worked,
+  //     which is worse than failing.
+  //   * a 336-hour median across about 4,000 items takes ~316ms. The plugin polls every couple of
+  //     seconds and the suggestion path was recomputing this per request, uncached. At 24 hours that
+  //     was 24ms and merely wasteful; at 336 it would have pegged the bridge.
+  // The underlying prices move once an hour at most, so a five-minute cache costs nothing real.
   let robustCache=null;
+  function robustPricesCached() {
+    const now=Date.now();
+    if(robustCache&&now-robustCache.at<300000)return robustCache.prices;
+    let prices=null;
+    try { prices=robustPrices(readArchive(dir,Math.floor(now/1000)-ROBUST_PRICE_HOURS*3600,Infinity,'1h'),ROBUST_PRICE_HOURS); } catch {}
+    // A FAILED build is not cached for the full five minutes. An empty reading is not neutral here:
+    // every item then falls back to its live spread, which is the behaviour this whole mechanism
+    // exists to replace, and pinning that for five minutes after a restart would make the tier
+    // quietly revert exactly when a player is most likely to be looking at it. Retried on the next
+    // request instead, with a short backoff so a genuinely archive-less install is not re-reading the
+    // disk on every poll.
+    const empty=!prices||!Object.keys(prices).length;
+    robustCache={at:empty?now-270000:now,prices:prices||{}};
+    return robustCache.prices;
+  }
+  // Warmed off the request path shortly after startup, because the FIRST poll after a restart must
+  // not pay for a two-week median. The plugin's readTimeout is 2000ms and a timeout there is not
+  // reported as slowness -- the sidebar says "Bridge unreachable, check it's running and the pairing
+  // key matches", which points at the wrong thing entirely and has already sent one debugging session
+  // down the wrong path. A second of delay keeps it clear of the bridge's own startup work.
+  setTimeout(()=>{try{robustPricesCached();}catch{}},1000).unref?.();
   function cashFor(account) {
     const own=lastCash.get(account||'');
     if(own)return own;
@@ -444,6 +477,19 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
         if(!same(req.headers.authorization,`Bearer ${secrets.plugin}`))return send(401,{error:'Plugin key required'});
         const b=await body();
         return send(200,{ok:true,blocked:setBlocked(b.itemId,b.blocked===undefined?true:b.blocked)});
+      }
+      // "I took this one." The only way EVI can honestly say what following it is worth: every other
+      // reading of its track record infers acceptance from an offer appearing soon after a
+      // suggestion, which cannot tell a followed pick from a trade the player meant to make anyway.
+      // Reversible by posting accepted:false, because a mistaken tap the player cannot undo is a tap
+      // they stop making. Records nothing beyond the id, the item and the time -- it goes in the
+      // same local journal as everything else and is never sent anywhere.
+      if(pathname==='/api/suggestion/accept'&&req.method==='POST') {
+        if(!same(req.headers.authorization,`Bearer ${secrets.plugin}`))return send(401,{error:'Plugin key required'});
+        const b=await body();
+        const result=acceptances.accept({id:b.id,account:b.account,itemId:b.itemId,
+          accepted:b.accepted===undefined?true:!!b.accepted});
+        return send(result.ok?200:400,result);
       }
       if(pathname==='/api/suggestion/personal-use'&&req.method==='POST') {
         if(!same(req.headers.authorization,`Bearer ${secrets.plugin}`))return send(401,{error:'Plugin key required'});
@@ -897,7 +943,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
                 volumes?Promise.resolve(volumes):suggestionPrices.get('https://prices.runescape.wiki/api/v1/osrs/1h',60000).then(t=>JSON.parse(t).data||{}),
               ]);
               let rankPrices=null;
-              try { rankPrices=robustPrices(archive.recentHourly(Math.floor(Date.now()/3600000)*3600-ROBUST_PRICE_HOURS*3600)); } catch {}
+              rankPrices=robustPricesCached();
               marketDeps={marketVolumes,rankPrices};
             }
             const fresh=pushedSuggestions.length && (Date.now()-pushedSuggestionsAt)<=MAX_PUSHED_AGE_MS;
@@ -936,7 +982,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
             // the tier to ranking on the scanner figures, exactly as before.
             let pushedRankPrices=null;
             if(pushedFresh) {
-              try { pushedRankPrices=robustPrices(archive.recentHourly(Math.floor(Date.now()/3600000)*3600-ROBUST_PRICE_HOURS*3600)); } catch {}
+              pushedRankPrices=robustPricesCached();
               try { await itemIndex(); } catch {}
             }
             const limitOf=id=>mappingCache.index?.get(id)?.limit;
@@ -966,13 +1012,18 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
                 volumes?Promise.resolve(volumes):suggestionPrices.get('https://prices.runescape.wiki/api/v1/osrs/1h',60000).then(t=>JSON.parse(t).data||{}),
               ]);
               // A steady price per item from the local archive, used to decide WHICH item wins rather
-              // than what it costs (see robustPrices). Null when the archive is off or too new, and
+              // than what it costs (see robustPrices). Empty when the archive is off or too new, and
               // the tier then ranks on `latest` exactly as it did before -- fail open, as ever.
-              let rankPrices=null;
-              try {
-                const hours=archive.recentHourly(Math.floor(Date.now()/3600000)*3600-ROBUST_PRICE_HOURS*3600);
-                rankPrices=robustPrices(hours);
-              } catch {}
+              //
+              // Through robustPricesCached, NOT archive.recentHourly. This exact line was the one call
+              // site missed when the window widened on 29 Sept 2026, and the failure was silent in the
+              // worst way: recentHourly keeps only RECENT_HOURS (26) buckets, so asking it for two
+              // weeks returns a DAY and robustPrices happily takes a median of it. The tier went on
+              // believing it had a fortnight of evidence while ranking on 26 hours, which is the old
+              // behaviour wearing the new one's clothes. Caught because Mort myre fungus kept being
+              // offered: its two-week margin is 2 gp against a 4 gp tax, so the tax bar should have
+              // dropped it outright, and on a one-day view it passed.
+              const rankPrices=robustPricesCached();
               const marketOpts={blocklist:undefined,maxSpend,targetDurationMinutes,maxStackShare,taxFreeOnly,rankPrices,rankBy:marketRankBy,...sizing,...gates};
               rank=bl=>computeMarketSuggestion(mappingCache.list,latest,marketVolumes,{...marketOpts,minProfit,blocklist:bl});
               // Both sources, at any floor, so the "how far would I have to come down" probe and the
@@ -1352,7 +1403,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           }
           // Besides the settings, what the slot and correlation checks did on this poll (see checksOf in
           // suggestionLog.mjs for the per-suggestion verdicts), so their calls can be judged later.
-          suggestionLog.record({account:url.searchParams.get('account')||undefined,suggestion,
+          const logged=suggestionLog.record({account:url.searchParams.get('account')||undefined,suggestion,
             context:{cash:maxSpend??null,durationMinutes:targetDurationMinutes??null,minProfit:minProfit||null,risk,
               heldBack:heldBack.length?heldBack.map(h=>({itemId:h.itemId,reason:h.reason})):null,
               demotedPicks:demotedPicks.length?demotedPicks:null,
@@ -1362,6 +1413,12 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
                 recurrence:thinStats.recurrence[windowFor(targetDurationMinutes)],
                 unitsAvailable:thinStats.unitsWithin[windowFor(targetDurationMinutes)]}:null,
               buysHeldForExits:!!buysHeldForExits}});
+          // The handle the plugin echoes back when the player says they took this pick, which turns
+          // the track record from an inference into an observation (see acceptances.mjs). A repeat
+          // of the same pick keeps its first id, so accepting one that has been on screen a while
+          // still refers to a real log entry. Absent only if the log could not be written, in which
+          // case the plugin simply shows no button rather than offering one that cannot work.
+          if(suggestion&&logged&&logged.id){suggestion.id=logged.id;suggestion.accepted=acceptances.wasAccepted(logged.id);}
           // Time-based relist advice for sell offers that have been sitting (see relist.mjs). Built
           // from the bridge's own journal, which knows when each offer was placed and what its stock
           // cost, so the plugin needs to send nothing extra for it.
@@ -1708,12 +1765,12 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
       // Built from the same join as the scorecard below, so it costs one extra pass over the log.
       if(pathname==='/api/trading-periods') {
         const state=store.state();
-        const rows=joinSuggestionOutcomes(suggestionLog.recent(2000),[...store.offers.values()],[...state.flips,...state.autoFlips]);
+        const rows=joinSuggestionOutcomes(suggestionLog.recent(2000),[...store.offers.values()],[...state.flips,...state.autoFlips],{wasAccepted:acceptances.wasAccepted});
         return send(200,{periods:tradingPeriods(rows)});
       }
       if(pathname==='/api/suggestion-outcomes') {
         const state=store.state();
-        const rows=joinSuggestionOutcomes(suggestionLog.recent(500),[...store.offers.values()],[...state.flips,...state.autoFlips]);
+        const rows=joinSuggestionOutcomes(suggestionLog.recent(500),[...store.offers.values()],[...state.flips,...state.autoFlips],{wasAccepted:acceptances.wasAccepted});
         return send(200,{summary:summarizeOutcomes(rows),recent:rows.slice(-25).reverse()});
       }
       // Which tradeable items each recent news post connects to, and the chain of game mechanics
@@ -1760,13 +1817,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
       // reading" and falls back to the quoted spread exactly as before. Cached for five minutes: it
       // moves once an hour at most.
       if(pathname==='/api/robust-prices') {
-        const now=Date.now();
-        if(!robustCache||now-robustCache.at>300000) {
-          let prices=null;
-          try { prices=robustPrices(archive.recentHourly(Math.floor(now/3600000)*3600-ROBUST_PRICE_HOURS*3600)); } catch {}
-          robustCache={at:now,prices:prices||{}};
-        }
-        return send(200,{hours:ROBUST_PRICE_HOURS,prices:robustCache.prices});
+        return send(200,{hours:ROBUST_PRICE_HOURS,prices:robustPricesCached()});
       }
       if(pathname==='/api/wealth') {
         const st=store.state();

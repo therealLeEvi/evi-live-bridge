@@ -357,6 +357,8 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
     // does not drop stale prices -- an old last-trade is context here -- which is exactly how a ten-hour
     // old 10 gp print on Rune dart(p++) became a suggestion to buy 1,301 of them.
     if (implausibleSpread(net, p.low, volumeReadingFor(options.volumes, h.itemId))) continue;
+    // ...and the same for the buy price itself, which every check downstream takes on trust.
+    if (implausibleBuyPrint(p.low, options.volumes?.[String(h.itemId)])) continue;
     let quantity = Math.max(1, Math.round(h.medianQty));
     let cashLimited = false;
     if (maxSpend !== undefined) {
@@ -968,9 +970,76 @@ export function robustPrices(hourlyBuckets, hours = ROBUST_PRICE_HOURS) {
   }
   return Object.keys(out).length ? out : null;
 }
-/** How much history the robust price takes its median from, and the least it will accept. */
-export const ROBUST_PRICE_HOURS = 24;
+/**
+ * How much history the robust price takes its median from, and the least it will accept.
+ *
+ * Two weeks, not one day. 24 hours was chosen on 28 Sept 2026 because it was obviously long enough
+ * to drown a single freak print, which was the problem in front of us -- an Ape atoll teleport
+ * (tablet) topping the catalogue on one 28,756 print against hourly averages of 6,000. Nothing said
+ * 24 was right, and it is not long enough for the next problem along: a bad DAY.
+ *
+ * novi was offered 13,000 Raw kyatt the same evening. Over 14 archived days its margin has a median
+ * of 14 gp on an item costing 1,136, whose own GE tax is about 22 -- so its typical edge is thinner
+ * than its tax, the exact band this tier refuses at, and it is negative in 37% of hours. It passed
+ * because the last day happened to be unusually wide, and a 24-hour median endorses an unusually
+ * wide day. That is the blood-rune shape wearing a different hat.
+ *
+ * Measured by tools/robust-window.mjs, which varies nothing but this number. Across a two-day pace
+ * at 85m, a twelve-hour pace at 85m, and a twelve-hour pace at 2m, moving 24h -> 336h:
+ *
+ *   worst single trade   -32.4% -> -6.5%,  -35.1% -> -4.3%,  -35.1% -> -0.6%
+ *   picks that lose GP     9% -> 3%,         8% -> 6%,         4% -> 1%
+ *   picks reaching B/E    89% -> 97%,       89% -> 94%,       94% -> 98%
+ *   total profit         56.7m -> 71.5m,   31.3m -> 32.1m,   17.4m -> 16.0m
+ *
+ * A large, consistent improvement in the tail for roughly neutral total profit -- which is the trade
+ * this project takes every time, because the tail is what the adamant arrows and the blood runes
+ * were. 72h and 168h were also measured and sit between the two, monotonically in the worst case.
+ *
+ * It degrades gracefully on a fresh install: MIN_ROBUST_HOURS still governs, so an item with only a
+ * few days of archive is judged on what exists rather than dropped, and one with almost none falls
+ * back to the live price exactly as before. See robustPricesCached in server.mjs for why this must
+ * be read through readArchive and cached rather than recomputed per request.
+ */
+export const ROBUST_PRICE_HOURS = 336;
 export const MIN_ROBUST_HOURS = 6;
+
+/**
+ * A quoted BUY price can be a print rather than a price, and every other check takes it as given.
+ *
+ * Found live on 29 Sept 2026: EVI offered 2,000 Divine super defence potion(4) at **299** to sell at
+ * 5,177, a headline of nearly 10m gp. The item normally trades around 5,000-5,500, and its own hour
+ * had an average sell of **2,984 across 1,898 real trades** -- the 299 was a single print, a tenth of
+ * what everyone else in that same hour got. novi's read on the cause is the likely one: a player
+ * emptying leftovers after training Herblore floods the low side, which explains the volume spike and
+ * the crashed print together.
+ *
+ * Nothing caught it, and the reason is structural. The robust gate judged the ITEM and was right to
+ * pass it -- its steady spread is 5,022 -> 5,579, a real 446 gp margin. `implausibleSpread` requires
+ * the hour to be empty, and this hour was the busiest in a fortnight. And `headlineProfit` caps the
+ * figure using sell-support, but sell-support measures the SELL side and then subtracts the same
+ * bogus 299, so both of its inputs inherited the bad number and `min(quoted, supported)` was still
+ * about 9.5m. **Everything downstream trusted buyPrice; nothing validated it.**
+ *
+ * The test is deliberately against the SAME HOUR's own average rather than the 14-day median. An item
+ * in a genuine sustained decline sits far below its fortnight median quite legitimately and must not
+ * be dropped for it; a print at half of what 1,898 other trades in the same hour fetched cannot be
+ * explained that way. Measured across 2,496 items with a traded hourly average: the median print is
+ * 1.000x its hour's average, the 10th percentile 0.954x, the 1st percentile 0.506x. A cut at 0.5x
+ * touches **22 items, 0.88%**; the potion was at 0.100x.
+ *
+ * Returns false whenever there is nothing to judge against -- no average, or an hour with no trades
+ * on that side -- the standing fail-open rule. Absence of evidence never invents a constraint; this
+ * fires only on evidence that the print disagrees with its own hour.
+ */
+export const BUY_PRINT_MULTIPLE = 0.5;
+export function implausibleBuyPrint(low, volumeEntry, multiple = BUY_PRINT_MULTIPLE) {
+  if (!Number.isFinite(low) || low <= 0) return false;
+  const avg = volumeEntry?.avgLowPrice;
+  const traded = volumeEntry?.lowPriceVolume;
+  if (!(avg > 0) || !(traded > 0)) return false;
+  return low < avg * multiple;
+}
 
 export function computeMarketSuggestion(mapping, latestPrices, volumes, options = {}) {
   if (!Array.isArray(mapping) || !latestPrices) return null;
@@ -1051,6 +1120,9 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     // Belt and braces: MIN_HOURLY_VOLUME should already have excluded anything untraded here, but the
     // same reading is cheap and this tier must never be the one that offers a dead spread.
     if (implausibleSpread(net, p.low, volumeReadingFor(volumes, item.id))) continue;
+    // ...and the same for the buy price itself. A print that disagrees with its own hour is not a
+    // price, and quoting it makes every figure built on it wrong (see implausibleBuyPrint).
+    if (implausibleBuyPrint(p.low, volumes?.[String(item.id)])) continue;
     // The item's own GE buy limit when known (see DEFAULT_MARKET_QUANTITY_CAP above), else the cap.
     const limitKnown = Number.isFinite(item.limit) && item.limit > 0;
     // One limit per four-hour window the player's duration spans (see limitAllowance); the account's
@@ -1227,6 +1299,9 @@ export function computePushedSuggestion(candidates, options = {}) {
       && Number.isFinite(c.buy) && c.buy > 0 && Number.isFinite(c.sell) && c.sell > 0 && Number.isFinite(c.net) && c.net > 0)
     .sort((a, b) => (scoreOf(b) - scoreOf(a)) || ((b.score || 0) - (a.score || 0)));
   for (const c of ranked) {
+    // A buy price that disagrees with its own hour is a print, not a price. The scanner computes its
+    // rows from the same `latest` feed, so it inherits the same bad number and cannot see past it.
+    if (implausibleBuyPrint(c.buy, options.volumes?.[String(c.itemId)])) continue;
     // The scanner ranks on far more than current margin, but it cannot rank away the tax: an edge
     // thinner than this item's own tax is dropped here too (see marginClearsTax).
     if (options.requireMarginOverTax !== false

@@ -1492,3 +1492,71 @@ test("focus: the plugin's own setting wins for its request, and 'same as scanner
   assert.equal(resolveFocus('nonsense', 'bulk'), 'bulk', 'an unknown value is ignored, not adopted');
   assert.equal(resolveFocus(null, undefined), 'any');
 });
+
+// -- Skipping positions that are already listed. Found on novi's own bridge, 29 Sept 2026: the
+// picker returned the OLDEST open position and the caller then silenced it for being on the market,
+// but stopped there -- so a Cannon base listed since 00:02 hid three newer holdings behind it all
+// day, including 103 Black d'hide shields sitting unsold. The queue only advances when a position
+// CLOSES, never while it is merely selling, so a slow sale starves everything newer indefinitely. --
+
+test('persistent: a position already listed for sale is skipped, not left blocking the queue', () => {
+  const positions = [
+    position({itemId: 1, item: 'Cannon base', firstSeen: now - 40 * 3600000}),   // oldest, on the market
+    position({itemId: 2, item: "Black d'hide shield", firstSeen: now - 3600000}), // newer, sitting unsold
+  ];
+  const listed = id => id === 1;
+  assert.equal(pickPersistentOpenPosition(positions, 'acct-a', undefined, listed).itemId, 2,
+    'the first position NOT on the market is the one waiting to be sold');
+  // Without the predicate the old behaviour stands, so every existing caller is unaffected.
+  assert.equal(pickPersistentOpenPosition(positions, 'acct-a').itemId, 1);
+});
+
+test('persistent: age still decides among positions that are all unlisted', () => {
+  const positions = [
+    position({itemId: 2, firstSeen: now - 3600000}),
+    position({itemId: 1, firstSeen: now - 40 * 3600000}),
+  ];
+  assert.equal(pickPersistentOpenPosition(positions, 'acct-a', undefined, () => false).itemId, 1,
+    'oldest first is unchanged when nothing is listed');
+});
+
+test('persistent: everything listed means nothing is waiting to be sold', () => {
+  const positions = [position({itemId: 1}), position({itemId: 2})];
+  assert.equal(pickPersistentOpenPosition(positions, 'acct-a', undefined, () => true), null);
+});
+
+test('persistent: the blocklist and the listed check both apply', () => {
+  const positions = [position({itemId: 1}), position({itemId: 2}), position({itemId: 3})];
+  const pick = pickPersistentOpenPosition(positions, 'acct-a', new Set([1]), id => id === 2);
+  assert.equal(pick.itemId, 3, 'blocked and listed are both stepped over');
+});
+
+// -- An empty coin pouch is a real answer, not a missing one. Found by novi on 29 Sept 2026 after
+// banking their coins: EVI offered four 3rd Age robe tops at 131,812,123 each -- over half a billion
+// gp -- to a player carrying nothing. The guard was "maxSpend > 0", which treats a genuine zero as
+// "not supplied", and not supplied means no limit. The plugin already distinguishes the two: it
+// omits the cash parameter entirely when it has not read the inventory yet, so absent is unknown
+// and 0 is zero. --
+
+test('cash: zero cash can afford nothing, and is not read as no limit', () => {
+  const history = [flip(), flip()];
+  assert.equal(computeSuggestion(history, fresh(), Date.now(), {maxSpend: 0}), null,
+    'carrying nothing must buy nothing');
+  // Above zero the cap still works normally: 100 gp a unit, so 100 gp affords exactly one.
+  const barely = computeSuggestion(history, fresh(), Date.now(), {maxSpend: 100});
+  assert.equal(barely && barely.quantity, 1, 'a hundred gp affords exactly one unit at 100 each');
+  // And genuinely absent still means unknown, so a missing reading never silences EVI.
+  const unknown = computeSuggestion(history, fresh(), Date.now(), {});
+  assert.ok(unknown && unknown.quantity >= 1, 'no cash figure at all leaves the suggestion unconstrained');
+});
+
+test('cash: zero cash stops the market tier too, not only the history tier', () => {
+  const items = mapping([{id: 3, name: 'Slow mover', limit: 100}]);
+  const p = prices({'3': {high: 130, low: 100}});
+  const vols = {'3': {highPriceVolume: 500, lowPriceVolume: 500}};
+  // The fixture genuinely produces a pick, so the zero-cash assertion below cannot pass trivially.
+  const normal = computeMarketSuggestion(items, p, vols, {blocklist: new Set([1, 2])});
+  assert.equal(normal && normal.itemId, 3, 'the fixture must produce a suggestion when cash is unknown');
+  assert.equal(computeMarketSuggestion(items, p, vols, {blocklist: new Set([1, 2]), maxSpend: 0}), null,
+    'the market tier must respect an empty pouch as well');
+});

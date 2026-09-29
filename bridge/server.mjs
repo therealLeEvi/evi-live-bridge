@@ -541,7 +541,9 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // is never suggested. Omitted entirely when the plugin hasn't observed it yet (e.g. just
           // logged in), which behaves exactly as before this existed.
           const cashParam=Number(url.searchParams.get('cash'));
-          const maxSpend=Number.isFinite(cashParam)&&cashParam>0?cashParam:undefined;
+          // >= 0: cash=0 is "carrying nothing", not "did not say". The plugin omits the parameter entirely
+          // when the stack is unknown, so absent already covers that case. See the matching note in suggestions.mjs.
+          const maxSpend=Number.isFinite(cashParam)&&cashParam>=0?cashParam:undefined;
           // The player's own preferred trade length (a plugin config setting, e.g. "~10 minutes"),
           // checked against the Wiki's /1h recent-volume data -- fetched here (once, cached 60s,
           // shared with the market fallback below and the existing /api/market/1h proxy) only when
@@ -884,7 +886,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // still gets reminded about instead of silently forgotten. See pickPersistentOpenPosition
           // in suggestions.mjs.
           if(!suggestion && !geFull) {
-            const openPosition=pickPersistentOpenPosition(state.autoOpenPositions,account,blocklist);
+            const openPosition=pickPersistentOpenPosition(state.autoOpenPositions,account,blocklist,listedForSale);
             if(openPosition) {
               suggestion=holdingOf(latest,openPosition.itemId,openPosition.remaining,openPosition.item,openPosition.buyId,openPosition.unitCost);
               // Marks this specifically as a reconstruction from the journal, not something the

@@ -336,7 +336,13 @@ function gateCandidate(itemId, quantity, options) {
 export function computeSuggestion(flips, latestPrices, now = Date.now(), options = {}) {
   const minProfit = Number.isFinite(options.minProfit) && options.minProfit > 0 ? options.minProfit : 0;
   const blocklist = options.blocklist instanceof Set ? options.blocklist : new Set();
-  const maxSpend = Number.isFinite(options.maxSpend) && options.maxSpend > 0 ? options.maxSpend : undefined;
+  // >= 0, not > 0: an EMPTY coin pouch is a real answer, not a missing one. The plugin sends no
+  // cash parameter at all when it has not read the inventory yet (cashStack -1), so absent already
+  // means unknown -- and treating a genuine 0 as unknown removed the cap entirely. Found by novi on
+  // 29 Sept 2026 after banking their coins: EVI offered four 3rd age robe tops at 131,812,123 each,
+  // over half a billion gp, to a player carrying nothing. At cash=1000 it correctly sized down to a
+  // 200 gp trade, which is what made the falsy-zero obvious.
+  const maxSpend = Number.isFinite(options.maxSpend) && options.maxSpend >= 0 ? options.maxSpend : undefined;
   const targetDurationMinutes = Number.isFinite(options.targetDurationMinutes) && options.targetDurationMinutes > 0 ? options.targetDurationMinutes : undefined;
   const tier = RISK_TIERS[options.risk] || RISK_TIERS.medium;
   const history = personalHistory(flips).filter(h =>
@@ -505,13 +511,28 @@ export function lookupItemPrice(latestPrices, itemId) {
 // there -- excludes it via the same `exclude=`/blocklist mechanism used for a manual skip, which
 // naturally makes the *next* call here advance to the next-earliest candidate instead of
 // repeating the same stale one. See the 2026-09-16 "checks the actual inventory" README entry.
-export function pickPersistentOpenPosition(openPositions, account, blocklist) {
+export function pickPersistentOpenPosition(openPositions, account, blocklist, isListed) {
   if (!Array.isArray(openPositions) || !account) return null;
   const exclude = blocklist instanceof Set ? blocklist : new Set();
+  const listed = typeof isListed === 'function' ? isListed : () => false;
   const mine = openPositions.filter(p => p && p.account === account && p.remaining > 0 && !exclude.has(p.itemId));
   if (!mine.length) return null;
   mine.sort((a, b) => a.firstSeen - b.firstSeen);
-  return mine[0];
+  // The FIRST one not already on the market, not simply the oldest.
+  //
+  // Returning the oldest and letting the caller silence it starved every position behind it. A
+  // position already listed is being sold, so the caller correctly declines to remind about it --
+  // but it then stopped, and nothing newer was ever reached. Found on novi's own bridge, 29 Sept
+  // 2026: a Cannon base listed since 00:02 sat at the head of the queue all day, hiding Granite
+  // boots, a Dagon'hai hat and 103 Black d'hide shields behind it, and the queue only advances when
+  // a position CLOSES, never when it is merely selling. The trigger is ordinary -- take a
+  // suggestion, collect a partial fill, take another -- so this reaches every user, not just a
+  // large trader.
+  //
+  // Walking past a listed position cannot make EVI noisier: it only ever arrives at stock that is
+  // genuinely sitting unsold with no offer behind it, which is exactly what this tier is for. If
+  // everything is listed there is nothing waiting to be sold, and null is the right answer.
+  return mine.find(p => !listed(p.itemId)) || null;
 }
 
 // holdBuyId: the specific GE buy offer this holding position came from, when known -- the live
@@ -1045,7 +1066,13 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
   if (!Array.isArray(mapping) || !latestPrices) return null;
   const minProfit = Number.isFinite(options.minProfit) && options.minProfit > 0 ? options.minProfit : 0;
   const blocklist = options.blocklist instanceof Set ? options.blocklist : new Set();
-  const maxSpend = Number.isFinite(options.maxSpend) && options.maxSpend > 0 ? options.maxSpend : undefined;
+  // >= 0, not > 0: an EMPTY coin pouch is a real answer, not a missing one. The plugin sends no
+  // cash parameter at all when it has not read the inventory yet (cashStack -1), so absent already
+  // means unknown -- and treating a genuine 0 as unknown removed the cap entirely. Found by novi on
+  // 29 Sept 2026 after banking their coins: EVI offered four 3rd age robe tops at 131,812,123 each,
+  // over half a billion gp, to a player carrying nothing. At cash=1000 it correctly sized down to a
+  // 200 gp trade, which is what made the falsy-zero obvious.
+  const maxSpend = Number.isFinite(options.maxSpend) && options.maxSpend >= 0 ? options.maxSpend : undefined;
   const targetDurationMinutes = Number.isFinite(options.targetDurationMinutes) && options.targetDurationMinutes > 0 ? options.targetDurationMinutes : undefined;
   const now = Number.isFinite(options.now) ? options.now : Date.now();
   const maxPriceAgeMinutes = Number.isFinite(options.maxPriceAgeMinutes) ? options.maxPriceAgeMinutes : MAX_PRICE_AGE_MINUTES;
@@ -1265,7 +1292,13 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
 export function computePushedSuggestion(candidates, options = {}) {
   if (!Array.isArray(candidates)) return null;
   const blocklist = options.blocklist instanceof Set ? options.blocklist : new Set();
-  const maxSpend = Number.isFinite(options.maxSpend) && options.maxSpend > 0 ? options.maxSpend : undefined;
+  // >= 0, not > 0: an EMPTY coin pouch is a real answer, not a missing one. The plugin sends no
+  // cash parameter at all when it has not read the inventory yet (cashStack -1), so absent already
+  // means unknown -- and treating a genuine 0 as unknown removed the cap entirely. Found by novi on
+  // 29 Sept 2026 after banking their coins: EVI offered four 3rd age robe tops at 131,812,123 each,
+  // over half a billion gp, to a player carrying nothing. At cash=1000 it correctly sized down to a
+  // 200 gp trade, which is what made the falsy-zero obvious.
+  const maxSpend = Number.isFinite(options.maxSpend) && options.maxSpend >= 0 ? options.maxSpend : undefined;
   const minProfit = Number.isFinite(options.minProfit) && options.minProfit > 0 ? options.minProfit : 0;
   // Ranked by the BRIDGE's own measure, with the scanner's score only as a tie-break.
   //

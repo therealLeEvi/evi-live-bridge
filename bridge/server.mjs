@@ -7,7 +7,7 @@ import {Store} from './store.mjs';
 import {createMarketCache} from './marketCache.mjs';
 import {createIconCache} from './icons.mjs';
 import {parseLog,buildOffers,flipsFrom,summarise,resolveLogFile} from './exchangeLog.mjs';
-import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,holdingPreempts,hasLiveSellOffer,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_MULTIPLE,MARGIN_TAX_NO_HISTORY_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,robustPrices,ROBUST_PRICE_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
+import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,holdingPreempts,hasLiveSellOffer,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,comparableAsHistoryPick,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_MULTIPLE,MARGIN_TAX_NO_HISTORY_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,robustPrices,ROBUST_PRICE_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
 import {estimateUnitTax} from './tax.mjs';
 import {createSuggestionLog,checksOf} from './suggestionLog.mjs';
 import {createAcceptances} from './acceptances.mjs';
@@ -18,6 +18,7 @@ import {createNewsChains} from './newsChains.mjs';
 import {createCorrelationIndex,correlationNote,CORRELATED_THRESHOLD} from './correlation.mjs';
 import {buildFillModel,fillChance,fillChanceSentence} from './fillModel.mjs';
 import {relistAdvice} from './relist.mjs';
+import {holdingsAdvice} from './holdingsAdvice.mjs';
 import {sellAdvice} from './sellAdvice.mjs';
 import {buyMarginAdvice} from './buyAdvice.mjs';
 import {wealthSnapshot,createWealthLog} from './wealth.mjs';
@@ -919,7 +920,12 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
             if(Object.keys(inventory).length) {
               await itemIndex();
               const inventoryBlocklist=new Set([...blocklist,...(state.personalUseItemIds||[])]);
-              suggestion=computeInventorySuggestion(latest,inventory,mappingCache.list,{blocklist:inventoryBlocklist,membersBlocked});
+              // This account's own open positions: the holding tier owns those items, and only it
+              // can say what was paid for them. See computeInventorySuggestion.
+              const positionItemIds=new Set((state.autoOpenPositions||[])
+                .filter(pos=>pos&&pos.account===account&&pos.remaining>0&&Number.isFinite(pos.unitCost))
+                .map(pos=>pos.itemId));
+              suggestion=computeInventorySuggestion(latest,inventory,mappingCache.list,{blocklist:inventoryBlocklist,positionItemIds,membersBlocked});
             }
           }
           // Items blocked with the sidebar's Block button (see setBlocked) are never suggested to BUY
@@ -974,7 +980,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // change and pays no extra mapping/volume fetch for a tier that will just fall through.
           // With "both", the history pick is set aside here and compared against the market pick
           // below, rather than ending the search. Its own checks have already run on it.
-          const historyPick=wantSource==='both'?suggestion:null;
+          const historyPick=comparableAsHistoryPick(suggestion,wantSource)?suggestion:null;
           if(historyPick)suggestion=null;
           if(!suggestion && !geFull && !buysHeldForExits && url.searchParams.get('includeMarket')==='1') {
             const pushedFresh=pushedSuggestions.length && (Date.now()-pushedSuggestionsAt)<=MAX_PUSHED_AGE_MS;
@@ -1457,6 +1463,18 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
             offers:liveSells.map(o=>({itemId:o.itemId,name:o.name,price:o.price,remaining:Math.max(0,o.total-o.filled),firstSeen:o.firstSeen})),
             prices:relistPrices,costBasis,targetDurationMinutes:targetDurationMinutes??1440,
           });
+          // What this account is HOLDING, stated whatever the profit setting says -- novi, 30 Sept:
+          // "it should be able to see it no matter the profit setting since it is a item we bought".
+          // A separate question from "what should I do next", so a separate channel: the suggestion
+          // slot still decides what to ADVISE, and holdingPreempts still governs that, unchanged.
+          // See holdingsAdvice.mjs for why the bar was not lowered instead.
+          const holdingNotes=holdingsAdvice({
+            positions:(state.autoOpenPositions||[]).filter(p=>!account||p.account===account),
+            prices:latest,
+            listedItemIds:new Set(state.active.filter(o=>o.state==='SELLING'&&(!account||o.account===account)).map(o=>o.itemId)),
+            suggestedItemId:suggestion?suggestion.itemId:null,
+          }).map(n=>({itemId:n.itemId,name:n.name,message:n.message,level:n.level,label:n.label,
+            figures:n.figures,holding:true,belowBreakEven:false}));
           // Crash alerts for this player's own items -- running offers and stock EVI knows is held --
           // appended to relistAdvice, the list the published plugin already shows in full in its
           // sidebar, so they reach the player in game with no plugin change. Each is one complete
@@ -1535,7 +1553,16 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
               const supported=support&&Number.isFinite(support.netAtAverage)
                 ?Math.round(support.netAtAverage*q):null;
               suggestion.quotedProfit=quoted;
-              suggestion.expectedProfit=headlineProfit(quoted,supported);
+              // Stock EVI never saw bought has NO cost basis, so the spread between today's low and
+              // high is not a profit -- it is what a round trip WOULD have made, on an item the
+              // player already owns and did not buy at the low. Sending it would put a confident
+              // green "+171,735" on a card whose own prose says "worth an estimated 4,442,921 ...
+              // no buy EVI ever observed". Null instead: the panel omits the figure entirely
+              // (it already guards on null) and the verdict states the worth as a fact instead.
+              // Never estimated, the same rule breakEvenPrice follows in the holding tier.
+              suggestion.expectedProfit=suggestion.source==='inventory'
+                ?null
+                :headlineProfit(quoted,supported);
             }
           }
           };
@@ -1544,7 +1571,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // costs an archive pass each. They get every other check, and the panel shows no fill-history
           // line for them rather than a figure borrowed from a different item.
           for(const a of additional)enrich(a,null);
-          return send(200,{suggestion,additional,openItemPrice,slotPrices,slotFill,relistAdvice:[...crashNotes,...sellNotes,...buyNotes,...relist],
+          return send(200,{suggestion,additional,openItemPrice,slotPrices,slotFill,relistAdvice:[...crashNotes,...sellNotes,...buyNotes,...relist,...holdingNotes],
             slots:{...capacity,sellSlotsOwed,buysHeldForExits,positionItems},
             profit:profitSince(),
             reachable,

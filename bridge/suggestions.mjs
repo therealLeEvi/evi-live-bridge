@@ -753,12 +753,28 @@ const MIN_INVENTORY_VALUE = 100000;
 export function computeInventorySuggestion(latestPrices, inventory, mapping, options = {}) {
   if (!inventory || typeof inventory !== 'object' || !Array.isArray(mapping) || !latestPrices) return null;
   const blocklist = options.blocklist instanceof Set ? options.blocklist : new Set();
+  // Items EVI DID watch being bought and holds a cost basis for. They belong to the holding tier,
+  // which can state what was paid, what selling now nets and where break-even is. This tier cannot:
+  // its whole sentence is "no buy EVI ever observed for it -- likely a drop, a quest reward, or
+  // stock from before this bridge started watching", which about one of these is simply false.
+  //
+  // It said exactly that on 30 September 2026. novi raised their minimum profit to 1,000,000;
+  // holdingPreempts silenced the holding tier for a Gilded d'hide vambraces worth +254,063; and
+  // THIS tier, which runs last, picked up the same vambraces one second later and called it stock
+  // EVI never saw bought -- with breakEvenPrice null, after quoting 4,183,673 for it a minute
+  // earlier. Both lines are in suggestion-log.jsonl a minute apart.
+  //
+  // Note what this does NOT do: it does not put the holding back. When the holding tier steps aside
+  // the player now hears nothing about that item, which is what holdingPreempts actually decided.
+  // That is the point -- the wrong sentence was hiding the cost of that decision behind a right-
+  // looking card, and a gate whose effect is invisible cannot be judged.
+  const positionItemIds = options.positionItemIds instanceof Set ? options.positionItemIds : new Set();
   const names = new Map(mapping.filter(m => m && Number.isFinite(m.id)).map(m => [m.id, m.name]));
   const candidates = [];
   for (const [idStr, qty] of Object.entries(inventory)) {
     const itemId = parseInt(idStr, 10);
     // A members item can't be sold on a free-to-play world either, so the same gate applies here.
-    if (!Number.isFinite(itemId) || itemId === COINS_ITEM_ID || itemId === PLATINUM_TOKEN_ITEM_ID || !(qty > 0) || blocklist.has(itemId) || options.membersBlocked?.(itemId)) continue;
+    if (!Number.isFinite(itemId) || itemId === COINS_ITEM_ID || itemId === PLATINUM_TOKEN_ITEM_ID || !(qty > 0) || blocklist.has(itemId) || positionItemIds.has(itemId) || options.membersBlocked?.(itemId)) continue;
     const p = latestPrices[String(itemId)];
     if (!p || !(p.low > 0) || !(p.high > 0)) continue;
     const value = qty * p.high;
@@ -779,6 +795,30 @@ export function computeInventorySuggestion(latestPrices, inventory, mapping, opt
     buyId: null,
     reasoning: `You're holding ${qty.toLocaleString('en-US')} ${name} worth an estimated ${Math.round(value).toLocaleString('en-US')} gp at current prices, with no active offer and no buy EVI ever observed for it -- likely a drop, a quest reward, or stock from before this bridge started watching. Sell near ${p.high.toLocaleString('en-US')} gp if you don't need it.`,
   };
+}
+
+/**
+ * Is this pick one of the two BUYS that "Best of both" is meant to choose between?
+ *
+ * The setting exists because the personal-history tier could silently veto a better market pick --
+ * two ways of answering "what should I buy next", where keeping the worse one costs the player the
+ * difference. Both are claims on the same free slot and the same coins, so comparing them is right.
+ *
+ * A SELL of stock already owned is not a third answer to that question. The player holds it either
+ * way; selling it consumes neither the slot nor the coins the buy needs, and with a free slot they
+ * can do both. Ranking the two by value therefore compares nothing: whichever "loses" does not stop
+ * being worth doing. Until 30 September 2026 it did compare them, and the bridge's own words for it
+ * were "Your own Gilded d'hide vambraces is worth about 209,700 gp ... against 1,114,253 gp for this
+ * market-wide pick, so EVI set your history aside this time." novi was holding 1 Gilded d'hide
+ * vambraces, had four free slots, and could not get EVI to mention them even at "No minimum at all"
+ * -- which bypasses the OTHER gate on holdings (holdingPreempts) and lands squarely on this one.
+ *
+ * Whether a holding should pre-empt a new trade at all is a separate question with its own answer
+ * (holdingPreempts, judged against the player's minimum profit). This function must not also decide
+ * it, or one behaviour is governed in two places that cannot see each other.
+ */
+export function comparableAsHistoryPick(suggestion, wantSource) {
+  return wantSource === 'both' && !!suggestion && suggestion.action === 'buy';
 }
 
 // An hourly-volume floor below which an item is excluded from market-wide candidates even at a

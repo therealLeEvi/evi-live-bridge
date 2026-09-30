@@ -1572,3 +1572,28 @@ test('cash: zero cash stops the market tier too, not only the history tier', () 
   assert.equal(computeMarketSuggestion(items, p, vols, {blocklist: new Set([1, 2]), maxSpend: 0}), null,
     'the market tier must respect an empty pouch as well');
 });
+
+// -- The idle-inventory tier must not claim an item was never bought when EVI holds its cost basis.
+// 30 Sept 2026, from novi's own suggestion log one minute apart: at minProfit 1 the HOLDING tier
+// answered for Gilded d'hide vambraces with breakEven 4,183,673; at minProfit 1,000,000
+// holdingPreempts silenced it and this tier answered for the SAME item with breakEven null and the
+// sentence "no buy EVI ever observed for it -- likely a drop, a quest reward, or stock from before
+// this bridge started watching". EVI had watched the buy and knew they paid 4,100,000. --
+test('idle stock excludes items EVI holds a cost basis for', () => {
+  const prices = {23261: {low: 4271186, high: 4442921}, 1234: {low: 900000, high: 1000000}};
+  const mapping = [{id: 23261, name: "Gilded d'hide vambraces"}, {id: 1234, name: 'Something else'}];
+  const inventory = {23261: 1, 1234: 1};
+
+  const withoutPositions = computeInventorySuggestion(prices, inventory, mapping, {});
+  assert.equal(withoutPositions.itemId, 23261, 'by value alone the vambraces win');
+
+  const withPosition = computeInventorySuggestion(prices, inventory, mapping,
+    {positionItemIds: new Set([23261])});
+  assert.equal(withPosition.itemId, 1234,
+    'an item with an open position belongs to the holding tier, which can say what was paid');
+
+  // And when the ONLY thing held is a tracked position, this tier says nothing at all. Silence is
+  // the honest answer: it is what holdingPreempts decided, no longer hidden behind a wrong sentence.
+  assert.equal(computeInventorySuggestion(prices, {23261: 1}, mapping,
+    {positionItemIds: new Set([23261])}), null);
+});

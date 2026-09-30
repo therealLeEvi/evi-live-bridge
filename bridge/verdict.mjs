@@ -49,6 +49,30 @@ export function suggestionVerdict(suggestion) {
     };
   }
 
+  // A holding that is NOT a loss. Without this, the only holding that ever got a card was one being
+  // sold at a loss (the branch above), so your own stock drew a card exactly when the news was bad
+  // and fell back to a paragraph when it was good -- which is the wrong way round, and is what novi
+  // saw on 30 Sept: a Gilded d'hide vambraces worth +254,063 rendered as prose beside buy picks
+  // rendered as cards. Every figure here is one the holding tier already computed.
+  if (suggestion.source === 'holding' && Number.isFinite(suggestion.netIfSoldNow) && suggestion.netIfSoldNow >= 0) {
+    checks.push({ok: true, text: `+${gp(suggestion.netIfSoldNow)} gp over what you paid`});
+    if (Number.isFinite(suggestion.breakEvenPrice))
+      checks.push({ok: null, text: `Break-even after tax: ${gp(suggestion.breakEvenPrice)}`});
+    label = label || 'Above break-even';
+  }
+
+  // Stock EVI never watched being bought: a drop, a quest reward, or from before the bridge existed.
+  // CAUTION rather than CLEAR because the thing a card is best at -- putting one number in front of
+  // you -- is exactly what cannot be done honestly here. There is no cost basis, so there is no
+  // profit to state, only what the stack is worth today. Saying so is the check.
+  if (suggestion.source === 'inventory') {
+    const worth = (Number.isFinite(suggestion.sellPrice) ? suggestion.sellPrice : 0) * qty;
+    if (worth > 0) checks.push({ok: null, text: `Worth ~${gp(worth)} at today's price`});
+    checks.push({ok: null, text: 'No buy on record, so no profit is claimed'});
+    level = level === CLEAR ? CAUTION : level;
+    label = label || 'Not bought through EVI';
+  }
+
   // The supported margin: what the trade is worth at the price buyers have actually been paying, as
   // against the spread being quoted. This is the one that would have caught the Contracts.
   const support = suggestion.sellSupport;

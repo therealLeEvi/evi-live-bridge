@@ -90,3 +90,49 @@ test('lines stay short enough for a 225px panel', () => {
     for (const c of v.checks) assert.ok(c.text.length <= 46, `too long for the panel: ${c.text}`);
   }
 });
+
+// -- Holdings and idle stock. Before 30 Sept 2026 neither drew a card at all: the only sell that
+// produced a verdict was one at a LOSS, so your own stock got a card exactly when the news was bad
+// and a plain paragraph when it was good. novi reported it against a Gilded d'hide vambraces worth
+// +254,063 sitting in prose beside buy picks drawn as cards. --
+
+const holding = (over = {}) => ({itemId: 23261, name: "Gilded d'hide vambraces", action: 'sell',
+  source: 'holding', quantity: 1, buyPrice: 4100000, sellPrice: 4442921,
+  netIfSoldNow: 254063, breakEvenPrice: 4183673, ...over});
+
+test('a holding in profit gets a card, not a paragraph', () => {
+  const v = suggestionVerdict(holding());
+  assert.ok(v, 'a profitable holding must produce a verdict at all -- null falls back to prose');
+  assert.equal(v.level, CLEAR);
+  assert.equal(v.label, 'Above break-even');
+  assert.ok(v.checks.some(c => c.ok === true && /254,063/.test(c.text)), 'states what it is worth over cost');
+  assert.ok(v.checks.some(c => c.ok === null && /4,183,673/.test(c.text)), 'states break-even after tax');
+});
+
+test('a holding at a loss still leads with the loss, unchanged', () => {
+  // The pre-existing branch outranks the new one: a loss is the thing to say first.
+  const v = suggestionVerdict(holding({netIfSoldNow: -90000, lossIfSoldNow: 90000}));
+  assert.equal(v.level, WARN);
+  assert.equal(v.label, 'Selling now is a loss');
+});
+
+test('idle stock claims no profit, because there is no cost basis to claim one from', () => {
+  // The honest failure: EVI cannot say what you would MAKE on something it never saw you buy, only
+  // what it is worth today. Saying so is the check; inventing a figure would be the bug.
+  const v = suggestionVerdict({itemId: 23261, name: "Gilded d'hide vambraces", action: 'sell',
+    source: 'inventory', quantity: 1, buyPrice: 4271186, sellPrice: 4442921});
+  assert.ok(v, 'idle stock must produce a verdict');
+  assert.equal(v.level, CAUTION, 'not a clean bill of health: the one number a card is for is missing');
+  assert.equal(v.label, 'Not bought through EVI');
+  assert.ok(v.checks.every(c => c.ok !== true), 'nothing here passed a check; these are facts, not passes');
+  assert.ok(v.checks.some(c => /4,442,921/.test(c.text)), 'states what the stack is worth today');
+  assert.ok(v.checks.some(c => /no profit is claimed/i.test(c.text)), 'says plainly that no profit is claimed');
+});
+
+test('holding and idle lines fit the 225px panel too', () => {
+  for (const s of [holding(), {itemId: 1, action: 'sell', source: 'inventory', quantity: 3, sellPrice: 1234567}]) {
+    const v = suggestionVerdict(s);
+    assert.ok(v.label.length <= 30, `label too long: ${v.label}`);
+    for (const c of v.checks) assert.ok(c.text.length <= 46, `too long for the panel: ${c.text}`);
+  }
+});

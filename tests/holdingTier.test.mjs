@@ -8,7 +8,7 @@
 // player's own ask, for 152 gp, while the whole catalogue went unexamined.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {computeHoldingSuggestion, holdingPreempts, hasLiveSellOffer} from '../bridge/suggestions.mjs';
+import {computeHoldingSuggestion, holdingPreempts, hasLiveSellOffer, comparableAsHistoryPick} from '../bridge/suggestions.mjs';
 
 const PIE = {'22789': {low: 1504, high: 1689}};
 const pie = (qty = 1, cost = 1504) => computeHoldingSuggestion(PIE, 22789, qty, 'Uncooked dragonfruit pie', 'buy-1', cost);
@@ -79,4 +79,26 @@ test('what counts as "on the market" is the live slot snapshot, not the journal'
 
   // One of several slots, and junk in the list, are both handled.
   assert.equal(hasLiveSellOffer([null, {itemId: 1, state: 'BUYING', account: me}, listed], 22789, me), true);
+});
+
+// -- "Best of both" compares two BUYS, never a buy against stock you already own. --
+// 30 Sept 2026: novi held 1 Gilded d'hide vambraces with four free slots and could not get EVI to
+// mention it even at "No minimum at all" -- which bypasses holdingPreempts and lands on this gate
+// instead. The bridge's own logged reason: "Your own Gilded d'hide vambraces is worth about 209,700
+// gp ... against 1,114,253 gp for this market-wide pick, so EVI set your history aside this time."
+test('a holding is never set aside as if it were a competing buy', () => {
+  const holding = {itemId: 23261, action: 'sell', source: 'holding', name: "Gilded d'hide vambraces"};
+  assert.equal(comparableAsHistoryPick(holding, 'both'), false,
+    'selling stock you own and buying something new are not alternatives: you can do both');
+  assert.equal(comparableAsHistoryPick({itemId: 1, action: 'sell', source: 'inventory'}, 'both'), false,
+    'idle stock is not a competing buy either');
+});
+
+test('two buys are still compared, which is what the setting is for', () => {
+  const buy = {itemId: 20104, action: 'buy', source: 'personal'};
+  assert.equal(comparableAsHistoryPick(buy, 'both'), true);
+  // ...and only under "Best of both": the other two settings decide by tier order, not by value.
+  assert.equal(comparableAsHistoryPick(buy, 'history'), false);
+  assert.equal(comparableAsHistoryPick(buy, 'market'), false);
+  assert.equal(comparableAsHistoryPick(null, 'both'), false);
 });

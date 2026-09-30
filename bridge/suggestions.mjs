@@ -731,8 +731,8 @@ export function breakEvenSellPrice(itemId, unitCost) {
 // judge it by otherwise, and applies MIN_INVENTORY_VALUE as a floor so trivial junk never gets
 // suggested.
 // inventory: {[itemId]: quantity} -- the plugin's own current inventory snapshot, already summed
-// across any unstacked duplicate slots. Coins (COINS_ITEM_ID) are always excluded -- gp itself is
-// never "something to sell". mapping: the Wiki /mapping response body (array of {id, name, limit,
+// across any unstacked duplicate slots. Coins and platinum tokens (COINS_ITEM_ID,
+// PLATINUM_TOKEN_ITEM_ID) are always excluded -- gp itself is never "something to sell". mapping: the Wiki /mapping response body (array of {id, name, limit,
 // members, ...}), used only to resolve a display name.
 // options.blocklist: unlike computeSuggestion/computeMarketSuggestion's blocklist (session
 // skip/active-GE-slot exclusions only), the caller (GET /api/suggestion) also merges in every
@@ -743,6 +743,12 @@ export function breakEvenSellPrice(itemId, unitCost) {
 // buyId:null since, by definition, there is no specific buy offer behind this pick to round-trip
 // through the personal-use flow.
 const COINS_ITEM_ID = 995;
+// Platinum tokens are gp too, at 1,000 each. Excluded for exactly the same reason coins are, and
+// the omission became a contradiction on 30 Sept 2026: the plugin now counts tokens as spending
+// power (refreshCashStack), so without this the idle-inventory tier would offer to SELL the very
+// stack the buy tiers were sizing against -- telling a player holding 5,000 tokens both that they
+// have 5m to spend and that they should sell 5m of stock.
+const PLATINUM_TOKEN_ITEM_ID = 13204;
 const MIN_INVENTORY_VALUE = 100000;
 export function computeInventorySuggestion(latestPrices, inventory, mapping, options = {}) {
   if (!inventory || typeof inventory !== 'object' || !Array.isArray(mapping) || !latestPrices) return null;
@@ -752,7 +758,7 @@ export function computeInventorySuggestion(latestPrices, inventory, mapping, opt
   for (const [idStr, qty] of Object.entries(inventory)) {
     const itemId = parseInt(idStr, 10);
     // A members item can't be sold on a free-to-play world either, so the same gate applies here.
-    if (!Number.isFinite(itemId) || itemId === COINS_ITEM_ID || !(qty > 0) || blocklist.has(itemId) || options.membersBlocked?.(itemId)) continue;
+    if (!Number.isFinite(itemId) || itemId === COINS_ITEM_ID || itemId === PLATINUM_TOKEN_ITEM_ID || !(qty > 0) || blocklist.has(itemId) || options.membersBlocked?.(itemId)) continue;
     const p = latestPrices[String(itemId)];
     if (!p || !(p.low > 0) || !(p.high > 0)) continue;
     const value = qty * p.high;

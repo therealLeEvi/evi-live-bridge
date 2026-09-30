@@ -525,6 +525,18 @@ test('inventory: an empty mapping still suggests -- mapping only supplies displa
   assert.equal(s.name, 'item 1'); // no mapping entry to resolve a real name from
 });
 
+test('inventory: platinum tokens are never suggested either -- they are gp, and are now counted as cash', () => {
+  // Added 30 Sept 2026 with the Beyond Max Cash change. The plugin counts tokens as spending power
+  // (refreshCashStack), so offering them as stock told a player holding 5,000 tokens both that they
+  // had 5m to spend and that they should sell 5m of stock. Found by /code-review before it shipped.
+  const withTokens = prices({'13204': {high: 1000, low: 1000}});
+  assert.equal(computeInventorySuggestion(withTokens, {13204: 5000}, mapping()), null);
+  // A real item alongside them is still offered, so the exclusion is the token and not the tier.
+  const both = prices({'13204': {high: 1000, low: 1000}, '1': {high: 130, low: 100}});
+  const s = computeInventorySuggestion(both, {13204: 5000, 1: 1000}, mapping());
+  assert.equal(s && s.itemId, 1, 'the ordinary item is still suggested');
+});
+
 test('inventory: coins are never suggested regardless of quantity', () => {
   const withCoins = prices({'995': {high: 1, low: 1}});
   assert.equal(computeInventorySuggestion(withCoins, {995: 50000000}, mapping()), null);

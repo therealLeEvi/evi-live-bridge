@@ -237,7 +237,7 @@ export function validatePacket(p) {
 export class Store {
   constructor(dir) {
     fs.mkdirSync(dir,{recursive:true});
-    this.file=path.join(dir,'events.jsonl'); this.offers=new Map(); this.sessions=new Map(); this.flips=[]; this.personalUse=new Set(); this.personalUseItems=new Set();
+    this.file=path.join(dir,'events.jsonl'); this.offers=new Map(); this.sessions=new Map(); this.flips=[]; this.personalUse=new Set(); this.personalUseItems=new Set(); this.personalUseKept=new Map();
     // Login-time continuity (see continuation() below): alias maps a plugin offerId first seen at
     // login onto the earlier record of the same GE offer; lastSlots holds each session's slot
     // contents (resolved offerIds) from its most recent logged-in packet. Both are rebuilt purely by
@@ -282,8 +282,19 @@ export class Store {
     if(r.type==='flip') {this.flips.push(r.flip);return;}
     if(r.type==='personal-use') {this.personalUse.add(this.resolve(r.buyId));return;}
     if(r.type==='personal-use-undo') {this.personalUse.delete(this.resolve(r.buyId));return;}
-    if(r.type==='personal-use-item') {this.personalUseItems.add(r.itemId);return;}
-    if(r.type==='personal-use-item-undo') {this.personalUseItems.delete(r.itemId);return;}
+    // `kept` is how many of this item the player holds FOR USE. Records written before 1 Oct 2026
+    // have none, and those stay blanket exclusions on purpose: we cannot know how many they had
+    // when they marked it, and guessing 1 would retroactively offer to sell a second one they had
+    // deliberately protected. Re-marking an old item gives it a count.
+    if(r.type==='personal-use-item') {
+      this.personalUseItems.add(r.itemId);
+      if(integer(r.kept,1)) this.personalUseKept.set(r.itemId,
+        // Re-marking RAISES the count rather than replacing it: marking again while holding fewer
+        // must not quietly shrink what is protected.
+        Math.max(r.kept, this.personalUseKept.get(r.itemId) || 0));
+      return;
+    }
+    if(r.type==='personal-use-item-undo') {this.personalUseItems.delete(r.itemId);this.personalUseKept.delete(r.itemId);return;}
     if(r.type==='flips-imported') {for(const f of r.flips)if(!this.importedFingerprints.has(f.fp)){this.importedFingerprints.add(f.fp);this.importedContent.add(importedContentKey(f));this.importedFlips.push(f);}return;}
     if(r.type==='flips-import-removed') {
       this.importedFlips=this.importedFlips.filter(f=>f.source!==r.source);
@@ -461,8 +472,14 @@ export class Store {
     // immediately resurface through that fallback and defeat the point of flagging it -- never
     // merged into the general blocklist used by computeSuggestion/computeMarketSuggestion, since
     // personal-use on one past purchase must never block a genuinely new flip of the same item.
+    // Items excluded WHOLESALE from the idle-inventory tier: every buy-derived mark, plus the
+    // item-level marks that carry no kept count (pre-1 Oct 2026 records). An item-level mark WITH a
+    // count is not here -- it is in personalUseKept, where only the surplus above the kept quantity
+    // is offered. "I own one of these for use" and "I never sell this item" are different statements
+    // and used to be the same one, so a whip drop carried beside a whip already marked was invisible.
     const personalUseItemIds=[...new Set([...[...this.personalUse].map(buyId=>this.offers.get(buyId)?.itemId).filter(Number.isFinite),
-      ...this.personalUseItems])];
+      ...[...this.personalUseItems].filter(id=>!this.personalUseKept.has(id))])];
+    const personalUseKept=Object.fromEntries(this.personalUseKept);
     // occupied: every offer sitting in one of the eight slots right now, INCLUDING finished ones
     // that have not been collected -- unlike `active`, which drops them. A bought-but-uncollected
     // offer still holds its slot, and that slot is exactly where its sell will go once collected, so
@@ -477,7 +494,7 @@ export class Store {
       // 9 purchases at cost; without saying so, a player cannot tell a real loss from a gap in the
       // records, and would reasonably conclude EVI loses GP. See dataHealth in the scanner.
       dataHealth:dataHealthOf(auto,[...this.personalUse].map(id=>this.offers.get(id)).filter(Boolean)),
-      personalUseBuyIds:[...this.personalUse],personalUseItemIds,personalUseItems:[...this.personalUseItems],
+      personalUseBuyIds:[...this.personalUse],personalUseItemIds,personalUseItems:[...this.personalUseItems],personalUseKept,
       // Ranking history only -- see importFlips. Never folded into netProfit/tradeCount below.
       importedFlips:this.importedFlips,
       importedSummary:this.importedFlips.length?{count:this.importedFlips.length,
@@ -635,12 +652,30 @@ export class Store {
   // still happily suggest BUYING that item to flip, and a purchase it does observe is matched and
   // counted exactly as before. Durable across restarts and reversible, like every other flip-state
   // change here.
-  markPersonalUseItem({itemId,personal}) {
+  markPersonalUseItem({itemId,personal,kept}) {
     if(!integer(itemId,1))throw Error('Invalid itemId');
     if(typeof personal!=='boolean')throw Error('Missing personal flag');
-    if(personal===this.personalUseItems.has(itemId))return {ok:true,itemId,personal};
-    this.append({type:personal?'personal-use-item':'personal-use-item-undo',itemId});
-    return {ok:true,itemId,personal};
+    // How many are kept for use: the quantity held at the moment of marking, which for gear is
+    // almost always 1. A FLOOR of 1 matters -- marking an item the player is not currently holding
+    // would otherwise record 0 and switch the exclusion off entirely, the exact opposite of what
+    // pressing the button means.
+    // Accept 0 and THEN floor it. An earlier version guarded with integer(kept,1), which rejects 0
+    // outright, so the floor below could never run and marking an item not currently held silently
+    // fell back to a blanket exclusion -- the comment claimed a behaviour the code could not reach.
+    const keep=Number.isInteger(kept)&&kept>=0?Math.max(1,kept):null;
+    const already=this.personalUseItems.has(itemId);
+    // Re-marking an already-marked item is not a no-op when it RAISES the kept count: a player who
+    // marked one and now holds two and marks again means "both of these are mine".
+    const raises=personal&&already&&keep!==null&&keep>(this.personalUseKept.get(itemId)||0);
+    // `kept` appears in the reply only when there IS one, so the shape a caller saw before this
+    // existed is byte-for-byte what it still sees. An existing test asserted that shape exactly and
+    // was right to fail when a null crept in.
+    const reply=()=>{const k=this.personalUseKept.get(itemId);
+      return personal&&Number.isFinite(k)?{ok:true,itemId,personal,kept:k}:{ok:true,itemId,personal};};
+    if(personal===already&&!raises)return reply();
+    if(personal)this.append({type:'personal-use-item',itemId,...(keep===null?{}:{kept:keep})});
+    else this.append({type:'personal-use-item-undo',itemId});
+    return reply();
   }
   setRemoved({id,removed}) {
     if(typeof removed!=='boolean'||!this.flips.some(f=>f.id===id))throw Error('Unknown flip');

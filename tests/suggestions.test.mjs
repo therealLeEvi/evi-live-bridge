@@ -1597,3 +1597,41 @@ test('idle stock excludes items EVI holds a cost basis for', () => {
   assert.equal(computeInventorySuggestion(prices, {23261: 1}, mapping,
     {positionItemIds: new Set([23261])}), null);
 });
+
+// -- "Yours, not stock" is quantity-aware: only the SURPLUS above what you keep is stock. --
+// novi, 29 Sept 2026: "if I get an ancestral robe top for example as a drop, it will probably still
+// not suggest to sell that one." Correct, and a design gap: marking an item hid EVERY unit of it for
+// ever, because "I own one of these for use" and "I never sell this item" were the same statement.
+test('only the surplus above what is kept for use is offered', () => {
+  const prices = {4151: {low: 1900000, high: 2000000}};
+  const mapping = [{id: 4151, name: 'Abyssal whip'}];
+
+  // Holding exactly what you keep: nothing to sell, and this is the common case.
+  assert.equal(computeInventorySuggestion(prices, {4151: 1}, mapping, {keptForUse: {4151: 1}}), null);
+
+  // A second one dropped. The one being worn stays silent; the spare is stock.
+  const two = computeInventorySuggestion(prices, {4151: 2}, mapping, {keptForUse: {4151: 1}});
+  assert.equal(two.itemId, 4151);
+  assert.equal(two.quantity, 1, 'one kept, one sellable -- never the whole stack');
+
+  const four = computeInventorySuggestion(prices, {4151: 4}, mapping, {keptForUse: {4151: 2}});
+  assert.equal(four.quantity, 2);
+});
+
+test('a mark with no kept count keeps the old blanket behaviour', () => {
+  // Marks written before 1 Oct 2026 carry no count. They stay in the wholesale blocklist rather
+  // than being assumed to be 1: guessing would retroactively offer to sell a second unit the player
+  // had deliberately protected, and we cannot know how many they held when they marked it.
+  const prices = {4151: {low: 1900000, high: 2000000}};
+  const mapping = [{id: 4151, name: 'Abyssal whip'}];
+  assert.equal(computeInventorySuggestion(prices, {4151: 5}, mapping, {blocklist: new Set([4151])}), null);
+});
+
+test('a kept count of zero still protects one', () => {
+  // Marking an item while not actually holding it would record 0 and switch the exclusion off
+  // entirely -- the exact opposite of what pressing the button means. Floored at 1 on both sides.
+  const prices = {4151: {low: 1900000, high: 2000000}};
+  const mapping = [{id: 4151, name: 'Abyssal whip'}];
+  assert.equal(computeInventorySuggestion(prices, {4151: 1}, mapping, {keptForUse: {4151: 0}}), null);
+  assert.equal(computeInventorySuggestion(prices, {4151: 2}, mapping, {keptForUse: {4151: 0}}).quantity, 1);
+});

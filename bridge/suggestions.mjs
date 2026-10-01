@@ -769,6 +769,14 @@ export function computeInventorySuggestion(latestPrices, inventory, mapping, opt
   // That is the point -- the wrong sentence was hiding the cost of that decision behind a right-
   // looking card, and a gate whose effect is invisible cannot be judged.
   const positionItemIds = options.positionItemIds instanceof Set ? options.positionItemIds : new Set();
+  // How many of each item the player keeps FOR USE, when they have said so with a quantity.
+  // Marking an item personal-use used to hide every unit of it for ever -- the one being worn and
+  // any duplicate that dropped -- because "I own one of these for use" and "I never sell this item"
+  // were the same statement. novi, 29 Sept: "if I get an ancestral robe top for example as a drop,
+  // it will probably still not suggest to sell that one." It bites hardest for a player who marks
+  // their whip, is later given one as a drop, carries it, and is never told it is worth 2m.
+  const keptForUse = options.keptForUse instanceof Map ? options.keptForUse
+    : new Map(Object.entries(options.keptForUse || {}).map(([k, v]) => [Number(k), v]));
   const names = new Map(mapping.filter(m => m && Number.isFinite(m.id)).map(m => [m.id, m.name]));
   const candidates = [];
   for (const [idStr, qty] of Object.entries(inventory)) {
@@ -777,9 +785,14 @@ export function computeInventorySuggestion(latestPrices, inventory, mapping, opt
     if (!Number.isFinite(itemId) || itemId === COINS_ITEM_ID || itemId === PLATINUM_TOKEN_ITEM_ID || !(qty > 0) || blocklist.has(itemId) || positionItemIds.has(itemId) || options.membersBlocked?.(itemId)) continue;
     const p = latestPrices[String(itemId)];
     if (!p || !(p.low > 0) || !(p.high > 0)) continue;
-    const value = qty * p.high;
+    // Only the SURPLUS above what is kept for use is stock. Holding exactly what you keep leaves
+    // nothing to offer, which is the common case and must stay silent.
+    const kept = keptForUse.get(itemId);
+    const sellable = Number.isFinite(kept) ? qty - Math.max(1, kept) : qty;
+    if (!(sellable > 0)) continue;
+    const value = sellable * p.high;
     if (value < MIN_INVENTORY_VALUE) continue;
-    candidates.push({itemId, qty, p, value, name: names.get(itemId) || `item ${itemId}`});
+    candidates.push({itemId, qty: sellable, p, value, name: names.get(itemId) || `item ${itemId}`});
   }
   if (!candidates.length) return null;
   candidates.sort((a, b) => b.value - a.value);

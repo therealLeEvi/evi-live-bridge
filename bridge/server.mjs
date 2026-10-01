@@ -19,6 +19,7 @@ import {createCorrelationIndex,correlationNote,CORRELATED_THRESHOLD} from './cor
 import {buildFillModel,fillChance,fillChanceSentence} from './fillModel.mjs';
 import {relistAdvice} from './relist.mjs';
 import {holdingsAdvice} from './holdingsAdvice.mjs';
+import {buyProgressAdvice} from './buyProgress.mjs';
 import {sellAdvice} from './sellAdvice.mjs';
 import {buyMarginAdvice} from './buyAdvice.mjs';
 import {wealthSnapshot,createWealthLog} from './wealth.mjs';
@@ -366,6 +367,11 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
   // because the scanner asks without naming one -- looking up its own empty key was why the goal
   // reported an unknown coin count while the player was logged in.
   const lastCash=new Map();
+  // The inventory the plugin reported on its most recent poll, per account. Kept so that marking an
+  // item "Personal use" can record HOW MANY are held for use without the plugin having to send a
+  // quantity -- the button posts only an item id, and changing that would cost a plugin release and
+  // a Hub round trip for something the bridge was already being told every two seconds.
+  const lastInventory=new Map();
   // The steady-price reading, built once and shared by every consumer: the suggestion path, the
   // pushed tier, and the scanner route.
   //
@@ -498,7 +504,16 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
         const personal=b.personal===undefined?true:b.personal;
         // An idle-inventory suggestion has no buy behind it (EVI never saw the item bought), so the
         // button sends the item instead and the exclusion is keyed by item. See markPersonalUseItem.
-        if(b.buyId===undefined||b.buyId===null)return send(200,store.markPersonalUseItem({itemId:b.itemId,personal}));
+        if(b.buyId===undefined||b.buyId===null) {
+          // How many are kept for use = how many are held right now, read from the most recent
+          // poll rather than from the request, which carries no quantity. A stale reading is worse
+          // than none -- it would protect a count the player no longer holds -- so anything older
+          // than a minute is ignored and the mark falls back to the blanket behaviour it always had.
+          const seen=lastInventory.get(b.account||'')||lastInventory.get('');
+          const fresh=seen&&(Date.now()-seen.at)<60000?seen.items:null;
+          const kept=fresh&&Number.isFinite(fresh[b.itemId])?fresh[b.itemId]:undefined;
+          return send(200,store.markPersonalUseItem({itemId:b.itemId,personal,kept}));
+        }
         return send(200,store.markPersonalUse({buyId:b.buyId,personal}));
       }
       // Which version of the plugin-bridge API this bridge speaks. The plugin and the bridge are
@@ -917,6 +932,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
               const itemId=parseInt(idPart,10),qty=parseInt(qtyPart,10);
               if(Number.isFinite(itemId)&&itemId>0&&Number.isFinite(qty)&&qty>0)inventory[itemId]=qty;
             }
+            if(Object.keys(inventory).length)lastInventory.set(account||'',{items:inventory,at:Date.now()});
             if(Object.keys(inventory).length) {
               await itemIndex();
               const inventoryBlocklist=new Set([...blocklist,...(state.personalUseItemIds||[])]);
@@ -925,7 +941,8 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
               const positionItemIds=new Set((state.autoOpenPositions||[])
                 .filter(pos=>pos&&pos.account===account&&pos.remaining>0&&Number.isFinite(pos.unitCost))
                 .map(pos=>pos.itemId));
-              suggestion=computeInventorySuggestion(latest,inventory,mappingCache.list,{blocklist:inventoryBlocklist,positionItemIds,membersBlocked});
+              suggestion=computeInventorySuggestion(latest,inventory,mappingCache.list,
+                {blocklist:inventoryBlocklist,positionItemIds,membersBlocked,keptForUse:state.personalUseKept||{}});
             }
           }
           // Items blocked with the sidebar's Block button (see setBlocked) are never suggested to BUY
@@ -1468,6 +1485,16 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // A separate question from "what should I do next", so a separate channel: the suggestion
           // slot still decides what to ADVISE, and holdingPreempts still governs that, unchanged.
           // See holdingsAdvice.mjs for why the bar was not lowered instead.
+          // A buy that has been open longer than the pace the player themselves set, with its
+          // elapsed time and progress stated and nothing predicted. Skips anything slotFill is
+          // already warning about, so one offer never produces two overlapping cards. See
+          // buyProgress.mjs for why this does NOT claim the offer is dead.
+          const buyProgressNotes=buyProgressAdvice({
+            offers:liveBuys.map(o=>({itemId:o.itemId,name:o.name,total:o.total,filled:o.filled,firstSeen:o.firstSeen})),
+            targetDurationMinutes,
+            alreadyFlagged:new Set((slotFill||[]).filter(f=>f&&f.likelyToFillInTime===false).map(f=>f.itemId)),
+          }).map(n=>({itemId:n.itemId,name:n.name,message:n.message,level:n.level,label:n.label,
+            figures:n.figures,belowBreakEven:false}));
           const holdingNotes=holdingsAdvice({
             positions:(state.autoOpenPositions||[]).filter(p=>!account||p.account===account),
             prices:latest,
@@ -1571,7 +1598,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           // costs an archive pass each. They get every other check, and the panel shows no fill-history
           // line for them rather than a figure borrowed from a different item.
           for(const a of additional)enrich(a,null);
-          return send(200,{suggestion,additional,openItemPrice,slotPrices,slotFill,relistAdvice:[...crashNotes,...sellNotes,...buyNotes,...relist,...holdingNotes],
+          return send(200,{suggestion,additional,openItemPrice,slotPrices,slotFill,relistAdvice:[...crashNotes,...sellNotes,...buyNotes,...relist,...buyProgressNotes,...holdingNotes],
             slots:{...capacity,sellSlotsOwed,buysHeldForExits,positionItems},
             profit:profitSince(),
             reachable,

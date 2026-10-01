@@ -432,3 +432,38 @@ test('personal use by item: gear EVI never saw bought can be excluded for good, 
   assert.throws(()=>store.markPersonalUseItem({itemId:0,personal:true}),/Invalid itemId/);
   assert.throws(()=>store.markPersonalUseItem({itemId:27241}),/Missing personal flag/);
 });
+
+test('personal use by item records how many are kept, raises on re-marking, and floors at 1', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'evi-kept-'));
+  const store = new Store(dir);
+
+  // No count given: the old blanket behaviour, and the reply shape is unchanged.
+  assert.deepEqual(store.markPersonalUseItem({itemId: 4151, personal: true}),
+    {ok: true, itemId: 4151, personal: true});
+  assert.ok(store.state().personalUseItemIds.includes(4151), 'no count: excluded wholesale');
+  assert.equal(store.state().personalUseKept[4151], undefined);
+
+  // With a count, it leaves the wholesale list and only the surplus is stock.
+  const s2 = new Store(dir);
+  s2.markPersonalUseItem({itemId: 4151, personal: false});
+  assert.deepEqual(s2.markPersonalUseItem({itemId: 4151, personal: true, kept: 1}),
+    {ok: true, itemId: 4151, personal: true, kept: 1});
+  assert.equal(s2.state().personalUseKept[4151], 1);
+  assert.ok(!s2.state().personalUseItemIds.includes(4151), 'a counted mark is not a wholesale one');
+
+  // Re-marking while holding more RAISES the count -- "both of these are mine".
+  assert.equal(s2.markPersonalUseItem({itemId: 4151, personal: true, kept: 2}).kept, 2);
+  assert.equal(s2.state().personalUseKept[4151], 2);
+  // ...and marking again while holding fewer must not quietly shrink what is protected.
+  assert.equal(s2.markPersonalUseItem({itemId: 4151, personal: true, kept: 1}).kept, 2);
+
+  // Marking while holding none would record 0 and switch the exclusion off entirely.
+  assert.equal(s2.markPersonalUseItem({itemId: 999, personal: true, kept: 0}).kept, 1);
+
+  // It survives a restart, like every other flip-state change.
+  assert.equal(new Store(dir).state().personalUseKept[4151], 2);
+  // And undoing clears the count with it.
+  const s3 = new Store(dir);
+  s3.markPersonalUseItem({itemId: 4151, personal: false});
+  assert.equal(s3.state().personalUseKept[4151], undefined);
+});

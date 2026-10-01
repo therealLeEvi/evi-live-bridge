@@ -82,6 +82,25 @@ tbody tr:hover{background:var(--hover)}
 .kv{display:grid;grid-template-columns:1fr auto;gap:4px 10px;font-size:13px}
 .kv .k{color:var(--muted)}.kv .v{text-align:right;font-variant-numeric:tabular-nums}
 .kv .strong{font-weight:700}
+/* Two pairs per row once there is room for them. The drawer's figure list is fourteen rows, which
+   pushed the chart below the fold on a normal window and made the whole panel read as a long column
+   of unrelated numbers. Collapses back to the single stack under 680px, so a narrow window or a
+   phone is unaffected. Each pair keeps its own `1fr auto`, so the right-aligned tabular-nums columns
+   still line up with each other. */
+@media (min-width:680px){
+  .kv{grid-template-columns:1fr auto 1fr auto;column-gap:26px}
+  /* A long sentence as a value would be squeezed into a half-width column and wrap badly, so
+     anything marked wide keeps the full row to itself. */
+  .kv .wide{grid-column:1/-1}
+  .kv .wide.v{text-align:left}
+  /* NOT added: a tint on alternate pairs to re-bind label to value. Two pairs per row makes the
+     pairing positional, and a long label can push its value far enough right to be read against the
+     next pair instead. The obvious fix -- nth-of-type striping -- does not work here: every child is
+     a span, so nth-of-type counts labels and values together, and the full-width row above breaks
+     the four-element rhythm so the stripes drift after it. If the pairing does turn out to read
+     badly, the robust fix is to wrap each pair in its own element rather than to out-clever the
+     selector. */
+}
 #itemDrawer .btn{display:inline-block;background:var(--panel2);color:var(--text);border:1px solid var(--line);
   border-radius:8px;padding:8px 10px;text-decoration:none}
 .chartwrap{position:relative;margin-top:6px}
@@ -1048,12 +1067,12 @@ async function openItem(id){
     +'<span class="k">Then sell at</span><span class="v strong">'+gpExact(r.sell)+'</span>'
     +'<span class="k">Expected, after tax</span><span class="v strong good">'+gp(r.expected)+'</span>'
     +(r.expectedQuoted!=null&&r.expectedQuoted>r.expected
-      ?'<span class="k">Quoted spread implies</span><span class="v muted">'+gp(r.expectedQuoted)+' &mdash; the last two trade prints. EVI uses the lower figure, from this item\x27s 24-hour median buy and sell.</span>':'')
+      ?'<span class="k wide">Quoted spread implies</span><span class="v muted wide">'+gp(r.expectedQuoted)+' &mdash; the last two trade prints. EVI uses the lower figure, from this item\x27s 24-hour median buy and sell.</span>':'')
     +'<span class="k">Cash needed</span><span class="v">'+gp(r.capital)+'</span>'
     +'<span class="k">Tax per item</span><span class="v">'+gpExact(r.tax)+'</span>'
     +'<span class="k">Profit per item</span><span class="v good">'+gpExact(r.net)+'</span>'
-    +'<span class="k strong">Most you can pay and still break even</span><span class="v strong">'+gpExact(maxBuy)+'</span>'
-    +'<span class="k strong">Least you can sell for and still break even</span><span class="v strong">'+(minSell==null?'&mdash;':gpExact(minSell))+'</span>'
+    +'<span class="k strong">Break-even buy price</span><span class="v strong">'+gpExact(maxBuy)+'</span>'
+    +'<span class="k strong">Break-even sell price</span><span class="v strong">'+(minSell==null?'&mdash;':gpExact(minSell))+'</span>'
     +'<span class="k">Latest instant-buy</span><span class="v">'+gpExact(r.sell)+' &middot; '+agoText(r.highTime)+'</span>'
     +'<span class="k">Latest instant-sell</span><span class="v">'+gpExact(r.buy)+' &middot; '+agoText(r.lowTime)+'</span>'
     +'<span class="k">1h average high / low</span><span class="v">'+(r.avgHigh1h?gp(r.avgHigh1h):'&mdash;')+' / '+(r.avgLow1h?gp(r.avgLow1h):'&mdash;')+'</span>'

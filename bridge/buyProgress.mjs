@@ -71,9 +71,11 @@ export function buyProgressAdvice({offers = [], targetDurationMinutes, alreadyFl
       figures: `${gp(filled)}/${gp(total)} · open ${since(openMs)}`,
       openMinutes: Math.round(openMs / 60000),
       filled, total,
-      message: `${name}: ${filled === 0 ? 'nothing has filled' : gp(filled) + ' of ' + gp(total) + ' filled (' + pct + '%)'}`
-        + ` after ${since(openMs)}, against the ${since(targetDurationMinutes * 60000)} you set as your trade pace. `
-        + `EVI is not predicting whether it will fill -- it cannot see the order book. This is the elapsed time and the progress, so the choice is yours.`,
+      // The card shows the item, the progress and the elapsed time. The sentence carries the pace it
+      // is being measured against, and the disclaimer -- which stays, because this sits next to
+      // checks that DO estimate fills and must not be mistaken for one. Shortened 1 Oct 2026.
+      message: `Your pace is ${since(targetDurationMinutes * 60000)}. `
+        + `EVI is not predicting whether it will fill -- this is the clock and the progress, nothing more.`,
       sortBy: openMs,
     });
   }

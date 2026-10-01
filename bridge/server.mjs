@@ -41,7 +41,14 @@ const MAX_PUSHED_AGE_MS=180000;
 // EVI_Flip_Scanner_V3.html's pushSuggestions()) while bounding memory if something misbehaves.
 const MAX_PUSHED_ITEMS=50;
 // The plugin-bridge API version served by GET /api/version. See that route for when to bump it.
-export const BRIDGE_API=1;
+// 2 (1 Oct 2026): the holdings channel, the buy-progress line, quantity-aware personal use, and
+// holdings no longer ranked against buys. None of it REQUIRES a new plugin -- an older plugin simply
+// ignores the extra advice entries -- but a newer plugin compares this number against what it
+// expects and tells the player their companion app is behind, which is the only way an out-of-date
+// bridge ever gets noticed: the plugin updates itself through the Hub, the bridge is a zip someone
+// downloaded once. Bump this whenever a release adds something a player would want and would
+// otherwise never hear about.
+export const BRIDGE_API=2;
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const same=(a,b)=>typeof a==='string'&&a.length===b.length&&timingSafeEqual(Buffer.from(a),Buffer.from(b));

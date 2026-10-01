@@ -28,8 +28,13 @@ test('a market that has moved away speaks without waiting out the clock',()=>{
   const drifted=[offer({firstSeen:hoursAgo(1)})];            // 13,000 against 12,500 is 3.85%
   const out=relistAdvice({offers:drifted,prices:prices(),costBasis:cost(),targetDurationMinutes:2880,now:NOW});
   assert.equal(out.length,1,'2 days of pace would otherwise mean 12 hours of silence');
-  assert.match(out[0].message,/market has moved away from your ask/);
-  assert.match(out[0].message,/3\.8% below it/);
+  // Shortened 1 Oct 2026: "the market has moved away" is the card's LABEL now, and both prices are
+  // in its figures row, so the sentence carries only what the card cannot show.
+  assert.equal(out[0].label,'Market moved away');
+  assert.match(out[0].figures,/13,000 asked/);
+  assert.match(out[0].message,/3\.8% over the going rate/);
+  assert.match(out[0].message,/6-7h/,'the measured consequence is the reason to act, and stays');
+  assert.ok(out[0].message.length<240,'short enough to read: '+out[0].message.length);
   assert.ok(!/after 1 hour/.test(out[0].message),'it leads with the market, not with impatience');
 
   // Still not instantly: placing an offer must not be second-guessed on the spot. An ask within 1% of
@@ -65,7 +70,7 @@ test('an offer already at or below the market is not nagged about',()=>{
 test('when the market still clears break-even it says so, and never tells you to relist',()=>{
   const [advice]=relistAdvice({offers:[offer()],prices:prices(12500),costBasis:cost(12000),now:NOW});
   assert.match(advice.message,/8 hours/);
-  assert.match(advice.message,/market is around 12,500/);
+  assert.match(advice.figures,/12,500 market/,'the market price is on the card, not repeated in the sentence');
   assert.match(advice.message,/still clears your break-even/);
   assert.match(advice.message,/Your call/);
   assert.equal(advice.belowBreakEven,false);

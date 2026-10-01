@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import {createBridge} from '../bridge/server.mjs';
+import {createBridge, BRIDGE_API} from '../bridge/server.mjs';
 test('loopback bridge protects personal scanner, API, origins, keys and static paths',async t=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'evi-http-'));
   const port=51749,app=createBridge({dir,port});await new Promise(resolve=>app.server.listen(port,'127.0.0.1',resolve));
@@ -85,7 +85,13 @@ test('loopback bridge protects personal scanner, API, origins, keys and static p
   assert.deepEqual((await unblock.json()).blocked,[]);
   // The API version: plugin key only, so a future plugin can tell an old bridge from a broken one.
   assert.equal((await get('/api/version',{headers:{Authorization:'Bearer '+app.secrets.scanner}})).status,401);
-  assert.deepEqual(await (await get('/api/version',{headers:{Authorization:'Bearer '+app.secrets.plugin}})).json(),{api:1,packet:1});
+  // Against the constant, not a literal: the number is MEANT to move (it went 1 -> 2 on 1 Oct 2026
+  // for the holdings channel and the buy-progress line), and a test that has to be edited on every
+  // bump teaches people to edit tests rather than think. What matters here is the route, its auth,
+  // and the shape. The plugin pins its OWN expectation separately, and a mismatch between the two is
+  // the whole point -- it surfaces to the player as "companion app out of date".
+  assert.deepEqual(await (await get('/api/version',{headers:{Authorization:'Bearer '+app.secrets.plugin}})).json(),{api:BRIDGE_API,packet:1});
+  assert.ok(BRIDGE_API >= 2, 'the API version must never go backwards');
   assert.equal((await get('/data/keys.json',{headers:{Cookie:cookie}})).status,404);
   assert.equal((await get('/api/market/anything?url=https://evil.example',{headers:{Cookie:cookie}})).status,404);
   // The browser scanner is optional: the bridge is published and usable on its own (the RuneLite

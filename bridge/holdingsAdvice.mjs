@@ -75,9 +75,11 @@ export function holdingsAdvice({positions = [], prices = {}, listedItemIds = new
       row.level = 'info';
       row.label = 'Holding';
       row.figures = `${gp(qty)} · cost ${gp(cost)}`;
-      row.message = `${name}: you're holding ${gp(qty)}, which cost ${gp(cost)} gp`
-        + (breakEven > 0 ? `, break-even ${gp(breakEven)} gp each` : '')
-        + `. No current price for it, so EVI can't say what it's worth today.`;
+      // Short on purpose: the card above already shows the item name and the quantity, so repeating
+      // them is spending the reader's attention on what is already on screen. Shortened 1 Oct 2026.
+      row.message = `Cost ${gp(cost)}`
+        + (breakEven > 0 ? `. Break-even ${gp(breakEven)} each` : '')
+        + `. No current price, so EVI can't say what it's worth today.`;
       rows.push(row);
       continue;
     }
@@ -89,12 +91,11 @@ export function holdingsAdvice({positions = [], prices = {}, listedItemIds = new
     row.level = net >= 0 ? 'info' : 'caution';
     row.label = net >= 0 ? 'Holding' : 'Holding, under water';
     row.figures = `${gp(qty)} · ${net >= 0 ? '+' : ''}${gp(net)} after tax`;
-    row.message = `${name}: you're holding ${gp(qty)}, bought for ${gp(cost)} gp. `
-      + (net >= 0
-        ? `Selling near ${gp(price)} gp each would net about +${gp(net)} gp after tax`
-        : `Selling near ${gp(price)} gp each would LOSE about ${gp(Math.abs(net))} gp after tax`)
-      + (breakEven > 0 ? `, break-even ${gp(breakEven)} gp each` : '') + '. '
-      + `Shown because you own it, not as a recommendation to sell.`;
+    // The card carries the name, the quantity and the net already, so the sentence adds only what it
+    // cannot fit: what was paid, break-even, and why this is listed at all. Shortened 1 Oct 2026.
+    row.message = `Bought for ${gp(cost)}`
+      + (breakEven > 0 ? `. Break-even ${gp(breakEven)} each` : '')
+      + `. Listed because you own it, not as advice to sell.`;
     rows.push(row);
   }
 

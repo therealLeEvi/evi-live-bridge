@@ -16,10 +16,14 @@ test('a holding is stated whatever the profit setting is -- there is no profit b
   assert.equal(line.quantity, 1);
   assert.equal(line.cost, 4100000);
   assert.ok(line.net > 0 && line.net < 300000, 'net after tax, not the gross sale price: ' + line.net);
-  assert.match(line.message, /you're holding 1/);
-  assert.match(line.message, /break-even/);
-  assert.match(line.message, /not as a recommendation to sell/,
+  // The card carries the name, quantity and net; the sentence carries only what it cannot fit.
+  // Shortened 1 Oct 2026 -- novi: "some of the messages are quite long".
+  assert.match(line.figures, /1 · \+254,063 after tax/, 'the card shows the quantity and the net');
+  assert.match(line.message, /Bought for 4,100,000/);
+  assert.match(line.message, /Break-even/);
+  assert.match(line.message, /not as advice to sell/,
     'it states what you own; advice belongs in the suggestion slot');
+  assert.ok(line.message.length < 120, 'short enough to read at a glance: ' + line.message.length);
 });
 
 test('nothing is said about stock with no cost basis -- never a guess', () => {
@@ -44,7 +48,9 @@ test('a loss is stated as plainly as a gain', () => {
   assert.ok(line.net < 0, 'under water');
   assert.equal(line.label, 'Holding, under water');
   assert.equal(line.level, 'caution');
-  assert.match(line.message, /LOSE about/);
+  // The loss is on the CARD now -- a negative figure under an explicit label -- rather than spelled
+  // out again in the sentence. It must still be impossible to miss.
+  assert.match(line.figures, /-/, 'the figures row shows it is negative: ' + line.figures);
 });
 
 test('no current price means the cost is still shown, and no worth is implied', () => {

@@ -94,20 +94,28 @@ export function relistAdvice({offers, prices, costBasis = new Map(), targetDurat
     // what prompted it. The early one leads with the market having moved, because the offer may be only
     // minutes old and "unsold after 20 minutes" would read as EVI being impatient rather than as news.
     const what = `${offer.remaining > 0 ? offer.remaining.toLocaleString('en-US') + ' still unsold' : 'unsold'}`;
+    // Shortened 1 Oct 2026 -- novi: "the message on the market moved away items is still really big".
+    // The card above already carries the item name, the label ("Market moved away" / "Not selling")
+    // and both prices in its figures row, so none of that is repeated here. What is left is what the
+    // card cannot show: how long it has sat, how far over the going rate it is, and the measured
+    // consequence. The history clause stays -- it is novi's own 316-offer measurement and is the
+    // reason to act, not decoration -- but it is stated once and briefly.
+    //
+    // This message is ONLY ever the plugin card's tooltip; the scanner does not consume relistAdvice.
     const head = pastTheClock
-      ? `${offer.name || 'item ' + offer.itemId}: ${what} after ${waited}, priced at ${offer.price.toLocaleString('en-US')} gp while the market is around ${market.toLocaleString('en-US')} gp.`
-      : `${offer.name || 'item ' + offer.itemId}: the market has moved away from your ask -- ${what} at ${offer.price.toLocaleString('en-US')} gp while buyers are around ${market.toLocaleString('en-US')} gp, ${(gap * 100).toFixed(1)}% below it. Asks more than 1% over the going rate took six to seven hours to sell in your own history, and a third to a half never sold at all.`;
+      ? `${what} after ${waited}.`
+      : `${(gap * 100).toFixed(1)}% over the going rate, ${what}. Past 1%, your own asks took 6-7h to sell and a third never did.`;
     let message, suggestedPrice;
     if (breakEven === null) {
       suggestedPrice = market;
-      message = `${head} Relisting nearer ${market.toLocaleString('en-US')} gp would be likelier to sell. EVI doesn't know what you paid for this, so it can't tell you whether that is still a profit -- check before you cancel.`;
+      message = `${head} Relisting nearer ${market.toLocaleString('en-US')} would be likelier to sell. EVI doesn't know what you paid, so check it is still a profit.`;
     } else if (market >= breakEven) {
       suggestedPrice = market;
-      message = `${head} Relisting at ${market.toLocaleString('en-US')} gp still clears your break-even of ${breakEven.toLocaleString('en-US')} gp after tax. Your call -- EVI never relists anything itself.`;
+      message = `${head} Relisting at market still clears your break-even of ${breakEven.toLocaleString('en-US')} after tax. Your call -- EVI never relists for you.`;
     } else {
       // The market is under water. Say so and stop; cutting a loss is the player's decision.
       suggestedPrice = breakEven;
-      message = `${head} The market is now BELOW your break-even of ${breakEven.toLocaleString('en-US')} gp after tax, so relisting at the market would lock in a loss. Holding for a recovery or cutting it is your call -- EVI won't choose for you.`;
+      message = `${head} The market is now BELOW your break-even (${breakEven.toLocaleString('en-US')} after tax), so relisting there would lock in a loss. Hold or cut -- EVI won't choose for you.`;
     }
     out.push({itemId: offer.itemId, name: offer.name, message, offerPrice: offer.price, marketPrice: market,
       // Below break-even is the one the player can lose GP on, so it is the one that reads as a warning.

@@ -149,10 +149,10 @@ export function sellPriceSupport(series, itemId, buyPrice, {hours = SELL_SUPPORT
 // is WEAKER (79.5% at the extreme against 59.8%). The useful question is "has this support already
 // passed", not "is this item expensive right now".
 //
-// What prompted it: novi was offered 278 Ape atoll teleports to buy at 10,051 and sell at 20,000.
+// What prompted it: a player was offered Ape atoll teleports with a quoted sell of 20,000.
 // The support said 7,392 buyers at an average of 22,231 -- but 86% of them were inside a two-hour
 // spike that had ended six hours earlier, nothing had gone at or above 20,000 since, and buyers were
-// paying 13,486. Over the 14 days before that, this would have fired on 9 of 445 real suggestions.
+// paying 13,486. About 2.6% of archived readings sit above the threshold, so this is narrow.
 export const STALE_SUPPORT_RATIO = 1.5;
 // Below this it is worth STATING but not acting on: a 5-9% median shortfall.
 export const SOFT_STALE_SUPPORT_RATIO = 1.25;
@@ -817,7 +817,7 @@ export function computeInventorySuggestion(latestPrices, inventory, mapping, opt
   // its whole sentence is "no buy EVI ever observed for it -- likely a drop, a quest reward, or
   // stock from before this bridge started watching", which about one of these is simply false.
   //
-  // It said exactly that on 30 September 2026. novi raised their minimum profit to 1,000,000;
+  // It said exactly that on 30 September 2026. A player raised their minimum profit;
   // holdingPreempts silenced the holding tier for a Gilded d'hide vambraces worth +254,063; and
   // THIS tier, which runs last, picked up the same vambraces one second later and called it stock
   // EVI never saw bought -- with breakEvenPrice null, after quoting 4,183,673 for it a minute
@@ -1012,7 +1012,7 @@ export function volumeShareForDuration(targetDurationMinutes) {
   // that line to judge, because 52 of the 61 largest orders were cancelled within minutes. The cap
   // sat at an observation ceiling, not at a measured cliff.
   //
-  // tools/copilot-fill-sizes.mjs supplied the missing half from 392 of novi's own COMPLETED Copilot
+  // tools/copilot-fill-sizes.mjs supplied the missing half from a player's COMPLETED Copilot
   // flips, which are sized far more aggressively: 59% of them were larger than this cap allowed, and
   // banded against one hour of the item's volume the median profit runs 34,510 at or under 0.5x,
   // 122,167 from 0.5x to 2x, then flattens (119,064 at 2x-5x, 161,462 at 5x-20x) while the median
@@ -1117,7 +1117,7 @@ export function robustPrices(hourlyBuckets, hours = ROBUST_PRICE_HOURS) {
  * (tablet) topping the catalogue on one 28,756 print against hourly averages of 6,000. Nothing said
  * 24 was right, and it is not long enough for the next problem along: a bad DAY.
  *
- * novi was offered 13,000 Raw kyatt the same evening. Over 14 archived days its margin has a median
+ * A player was offered Raw kyatt the same evening. Over 14 archived days its margin has a median
  * of 14 gp on an item costing 1,136, whose own GE tax is about 22 -- so its typical edge is thinner
  * than its tax, the exact band this tier refuses at, and it is negative in 37% of hours. It passed
  * because the last day happened to be unusually wide, and a 24-hour median endorses an unusually

@@ -32,7 +32,7 @@ export const MIN_GAP = 0.005;
 // slide, and EVI had nothing to say about it until half a day had passed -- while Flipping Copilot
 // pops an abort prompt as soon as the price drops. That is the gap this closes.
 //
-// Measured on novi's own 316 sell offers watched from placement (tools/sell-patience-observed.mjs).
+// Measured over a few hundred sell offers watched from placement (tools/sell-patience-observed.mjs).
 // Up to 1% over the going rate their sells clear in MINUTES -- median 0.1 to 0.4 hours, 83-92% within
 // twelve. Past 1% the median becomes six to seven hours and a third to a half never fill at all. So
 // the cliff is at 1%, and the only question is how far above it to sit to avoid becoming wallpaper:
@@ -94,17 +94,22 @@ export function relistAdvice({offers, prices, costBasis = new Map(), targetDurat
     // what prompted it. The early one leads with the market having moved, because the offer may be only
     // minutes old and "unsold after 20 minutes" would read as EVI being impatient rather than as news.
     const what = `${offer.remaining > 0 ? offer.remaining.toLocaleString('en-US') + ' still unsold' : 'unsold'}`;
+    // The 6-7h figure is EVI'S OWN MEASUREMENT over one player's sell offers, NOT the reader's
+    // record. It used to say "your own asks took 6-7h", which is false for anyone who has not
+    // placed hundreds of sells -- a new user was told their own history said something it never had.
+    // Compare fillModel.mjs, which may say "your own past offers" because it genuinely computes that
+    // per player. Attribute a measurement to whoever made it.
     // Shortened 1 Oct 2026 -- novi: "the message on the market moved away items is still really big".
     // The card above already carries the item name, the label ("Market moved away" / "Not selling")
     // and both prices in its figures row, so none of that is repeated here. What is left is what the
     // card cannot show: how long it has sat, how far over the going rate it is, and the measured
-    // consequence. The history clause stays -- it is novi's own 316-offer measurement and is the
+    // consequence. The history clause stays -- it is a real measurement over real offers and is the
     // reason to act, not decoration -- but it is stated once and briefly.
     //
     // This message is ONLY ever the plugin card's tooltip; the scanner does not consume relistAdvice.
     const head = pastTheClock
       ? `${what} after ${waited}.`
-      : `${(gap * 100).toFixed(1)}% over the going rate, ${what}. Past 1%, your own asks took 6-7h to sell and a third never did.`;
+      : `${(gap * 100).toFixed(1)}% over the going rate, ${what}. Past 1%, asks have taken 6-7h to sell in EVI's measurements, and a third never did.`;
     let message, suggestedPrice;
     if (breakEven === null) {
       suggestedPrice = market;

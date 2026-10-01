@@ -7,7 +7,7 @@ import {Store} from './store.mjs';
 import {createMarketCache} from './marketCache.mjs';
 import {createIconCache} from './icons.mjs';
 import {parseLog,buildOffers,flipsFrom,summarise,resolveLogFile} from './exchangeLog.mjs';
-import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,holdingPreempts,hasLiveSellOffer,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,comparableAsHistoryPick,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_MULTIPLE,MARGIN_TAX_NO_HISTORY_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,robustPrices,ROBUST_PRICE_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
+import {computeSuggestion,computeMarketSuggestion,computeHoldingSuggestion,holdingPreempts,hasLiveSellOffer,computeInventorySuggestion,computePushedSuggestion,pickPersistentOpenPosition,comparableAsHistoryPick,supportIsStale,supportedPriceForHeadline,lookupItemPrice,forecastFromSeries,timestepForHorizon,pickWithForecast,estimateOfferFill,estimateVolatility,marginClearsCushion,marginClearsTax,MARGIN_TAX_MULTIPLE,MARGIN_TAX_NO_HISTORY_MULTIPLE,slotCapacity,slotNote,slotExposure,withCostBasis,heldCostBasis,sellPriceSupport,sellSupportNote,mergeArchiveHours,SELL_SUPPORT_HOURS,robustPrices,ROBUST_PRICE_HOURS,limitAllowance,BULK_MIN_LIMIT,FOCUSES,focusAllows,resolveFocus} from './suggestions.mjs';
 import {estimateUnitTax} from './tax.mjs';
 import {createSuggestionLog,checksOf} from './suggestionLog.mjs';
 import {createAcceptances} from './acceptances.mjs';
@@ -41,14 +41,16 @@ const MAX_PUSHED_AGE_MS=180000;
 // EVI_Flip_Scanner_V3.html's pushSuggestions()) while bounding memory if something misbehaves.
 const MAX_PUSHED_ITEMS=50;
 // The plugin-bridge API version served by GET /api/version. See that route for when to bump it.
+// 3 (1 Oct 2026, later the same day): the stale-support cap -- a headline profit is no longer quoted
+//   at a price buyers have stopped paying. See supportedPriceForHeadline in suggestions.mjs.
 // 2 (1 Oct 2026): the holdings channel, the buy-progress line, quantity-aware personal use, and
-// holdings no longer ranked against buys. None of it REQUIRES a new plugin -- an older plugin simply
+//   holdings no longer ranked against buys. None of it REQUIRES a new plugin -- an older plugin simply
 // ignores the extra advice entries -- but a newer plugin compares this number against what it
 // expects and tells the player their companion app is behind, which is the only way an out-of-date
 // bridge ever gets noticed: the plugin updates itself through the Hub, the bridge is a zip someone
 // downloaded once. Bump this whenever a release adds something a player would want and would
 // otherwise never hear about.
-export const BRIDGE_API=2;
+export const BRIDGE_API=3;
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const same=(a,b)=>typeof a==='string'&&a.length===b.length&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
@@ -1584,8 +1586,20 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
               const quoted=Math.round(
                 (suggestion.sellPrice-suggestion.buyPrice-estimateUnitTax(suggestion.itemId,suggestion.sellPrice))*q);
               const support=suggestion.sellSupport;
-              const supported=support&&Number.isFinite(support.netAtAverage)
-                ?Math.round(support.netAtAverage*q):null;
+              // A THIRD cautious bound, beside the quoted spread and the supported average: when the
+              // support is mostly history, the price it names is capped at what buyers are paying
+              // NOW. Measured at 584,245 item-hours -- past 1.5x the latest print, the median price
+              // available over the next 12 hours is only 80% of the supported figure, and past 2x
+              // only 60%, stable out to 48 hours. See supportedPriceForHeadline in suggestions.mjs.
+              //
+              // It caps the NUMBER and never withholds the pick: buying at today's price may still
+              // be a fine trade. What was wrong on the Ape atoll teleport was EVI promising 20,000
+              // while nothing had gone at that price in six hours.
+              const honestPrice=supportedPriceForHeadline(support);
+              const supported=support&&Number.isFinite(support.netAtAverage)&&Number.isFinite(honestPrice)
+                ?Math.round((honestPrice-estimateUnitTax(suggestion.itemId,honestPrice)-suggestion.buyPrice)*q)
+                :null;
+              if(support&&supportIsStale(support))support.stale=true;
               suggestion.quotedProfit=quoted;
               // Stock EVI never saw bought has NO cost basis, so the spread between today's low and
               // high is not a profit -- it is what a round trip WOULD have made, on an item the

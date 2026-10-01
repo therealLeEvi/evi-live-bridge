@@ -109,16 +109,75 @@ export const SELL_SUPPORT_HOURS = 12;
 export function sellPriceSupport(series, itemId, buyPrice, {hours = SELL_SUPPORT_HOURS, nowMs = Date.now()} = {}) {
   if (!Array.isArray(series) || !series.length || !(buyPrice > 0)) return null;
   const end = Math.floor(nowMs / 3600000) * 3600, start = end - hours * 3600;
-  let units = 0, gp = 0;
+  let units = 0, gp = 0, latestTs = -Infinity, latestPaid = null;
   for (const p of series) {
     if (!(p.timestamp >= start && p.timestamp < end)) continue;
     const price = Number(p.avgHighPrice), vol = Number(p.highPriceVolume);
-    if (price > 0 && vol > 0) { units += vol; gp += price * vol; }
+    if (price > 0 && vol > 0) {
+      units += vol; gp += price * vol;
+      // The most recent hour anyone actually bought in. The average above has no sense of WHEN
+      // within the window, so this is what tells it apart from the present.
+      if (p.timestamp > latestTs) { latestTs = p.timestamp; latestPaid = price; }
+    }
   }
-  if (!units) return {units: 0, hours, averagePaid: null, netAtAverage: null, supported: false};
+  if (!units) return {units: 0, hours, averagePaid: null, netAtAverage: null, supported: false, latestPaid: null, staleness: null};
   const averagePaid = gp / units;
   const netAtAverage = averagePaid - estimateUnitTax(itemId, averagePaid) - buyPrice;
-  return {units, hours, averagePaid, netAtAverage, supported: netAtAverage > 0};
+  // How much of this support is already history. 1 means the window agrees with the present.
+  const staleness = latestPaid > 0 ? averagePaid / latestPaid : null;
+  return {units, hours, averagePaid, netAtAverage, supported: netAtAverage > 0, latestPaid, staleness};
+}
+
+// Above this, the 12-hour support average is mostly HISTORY rather than a description of the market
+// you are about to sell into, and the price it names is not reliably reachable.
+//
+// MEASURED, not chosen (tools/support-staleness.mjs, 1 Oct 2026, 584,245 item-hours over 14 days).
+// Banding by this exact ratio and asking what the MEDIAN price over the next 12 hours actually was,
+// as a share of the supported price:
+//
+//   under 1.1x   522,771 cases   100.2% realised   13.2% never reached again
+//   1.1 - 1.25x   31,236          94.7%            28.0%
+//   1.25 - 1.5x   14,953          90.6%            27.1%
+//   1.5 - 2x       8,519          80.4%            31.2%
+//   over 2x        6,766          59.8%            35.6%
+//
+// Monotone on both measures, and STABLE at 24h and 48h horizons -- at two days the worst band still
+// realises only 65%, so the shortfall is structural and waiting does not rescue it. 1.5 is where the
+// median shortfall reaches 20%.
+//
+// The obvious alternative -- how far the item is above its own two-week norm -- was measured too and
+// is WEAKER (79.5% at the extreme against 59.8%). The useful question is "has this support already
+// passed", not "is this item expensive right now".
+//
+// What prompted it: novi was offered 278 Ape atoll teleports to buy at 10,051 and sell at 20,000.
+// The support said 7,392 buyers at an average of 22,231 -- but 86% of them were inside a two-hour
+// spike that had ended six hours earlier, nothing had gone at or above 20,000 since, and buyers were
+// paying 13,486. Over the 14 days before that, this would have fired on 9 of 445 real suggestions.
+export const STALE_SUPPORT_RATIO = 1.5;
+// Below this it is worth STATING but not acting on: a 5-9% median shortfall.
+export const SOFT_STALE_SUPPORT_RATIO = 1.25;
+
+/**
+ * Is this support reading mostly history? Null-safe: an absent or unmeasurable reading is NOT stale,
+ * because "we could not tell" must never read as "we found a problem" -- the same fail-open rule
+ * every other check here follows.
+ */
+export function supportIsStale(detail, ratio = STALE_SUPPORT_RATIO) {
+  return !!detail && Number.isFinite(detail.staleness) && detail.staleness >= ratio;
+}
+
+/**
+ * The supported price, capped at what buyers are paying NOW when the support is stale.
+ *
+ * This is the whole intervention: the pick is not blocked, because buying at the current price may
+ * still be a perfectly good trade -- what was wrong on the Ape atoll teleport was EVI PROMISING
+ * 20,000 when nothing had gone at that price in six hours. Capping makes the number honest and
+ * leaves the decision where it belongs.
+ */
+export function supportedPriceForHeadline(detail) {
+  if (!detail || !Number.isFinite(detail.averagePaid)) return null;
+  if (!supportIsStale(detail)) return detail.averagePaid;
+  return Number.isFinite(detail.latestPaid) ? Math.min(detail.averagePaid, detail.latestPaid) : detail.averagePaid;
 }
 
 // Fills a Wiki /timeseries 1h series in from the local price archive. Measured 19 Sep 2026 across 8

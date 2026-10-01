@@ -91,6 +91,20 @@ export function suggestionVerdict(suggestion) {
     }
   }
 
+  // The support is mostly HISTORY. Said plainly, because the headline profit has already been capped
+  // on the strength of it and a number that drops without explanation is worse than no number.
+  // Measured over 584,245 item-hours: past 1.5x the latest print the median price available over the
+  // next 12 hours is 80% of the supported figure, past 2x only 60%. See supportIsStale.
+  if (support && Number.isFinite(support.staleness) && Number.isFinite(support.latestPaid)) {
+    if (support.staleness >= 1.5) {
+      level = level === CLEAR ? CAUTION : level;
+      label = label || 'Buyers have moved on';
+      checks.push({ok: false, text: `Now paying ~${gp(support.latestPaid)}, not ${gp(support.averagePaid)}`});
+    } else if (support.staleness >= 1.25) {
+      checks.push({ok: null, text: `Buyers now paying ~${gp(support.latestPaid)}`});
+    }
+  }
+
   // Can this price be bought again at all -- the fill-history reading (see thinMarket.mjs).
   const fill = suggestion.fillHistory;
   if (fill && Number.isFinite(fill.hoursTraded) && Number.isFinite(fill.hours) && fill.hours > 0) {

@@ -27,7 +27,7 @@ export const MIN_GAP = 0.005;
 //
 // The wait exists so EVI does not nag about an offer that is simply queueing, and it is right for
 // that. But it is a share of the player's own trade pace, and on Slow (~2 days) a quarter of it is
-// **twelve hours of silence** however far the market runs away. On 28 Sept 2026 novi was holding an
+// **twelve hours of silence** however far the market runs away. On 28 Sept 2026 a player was holding an
 // Inquisitor's hauberk listed 1.26% above the day's average buy price, with the item five days into a
 // slide, and EVI had nothing to say about it until half a day had passed -- while Flipping Copilot
 // pops an abort prompt as soon as the price drops. That is the gap this closes.
@@ -120,7 +120,7 @@ export function relistAdvice({offers, prices, costBasis = new Map(), targetDurat
     // placed hundreds of sells -- a new user was told their own history said something it never had.
     // Compare fillModel.mjs, which may say "your own past offers" because it genuinely computes that
     // per player. Attribute a measurement to whoever made it.
-    // Shortened 1 Oct 2026 -- novi: "the message on the market moved away items is still really big".
+    // Shortened 1 Oct 2026, on the maintainer's report that the market-moved-away message was too long.
     // The card above already carries the item name, the label ("Market moved away" / "Not selling")
     // and both prices in its figures row, so none of that is repeated here. What is left is what the
     // card cannot show: how long it has sat, how far over the going rate it is, and the measured

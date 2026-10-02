@@ -22,8 +22,8 @@ test('an offer that has not waited long enough is left alone',()=>{
 
 test('a market that has moved away speaks without waiting out the clock',()=>{
   // The gap this closes: the wait is a share of the player's pace, so on Slow (~2 days) a quarter of
-  // it is twelve hours of silence however far the price runs. Measured on 316 of novi's own sell
-  // offers, an ask more than 1% over the going rate took six to seven hours to sell and a third to a
+  // it is twelve hours of silence however far the price runs. Measured over 316 sell offers from one
+  // player's own journal -- not a market-wide figure -- an ask more than 1% over the going rate took six to seven hours to sell and a third to a
   // half never sold at all -- so at that point waiting is the wrong advice, not the cautious one.
   const drifted=[offer({firstSeen:hoursAgo(1)})];            // 13,000 against 12,500 is 3.85%
   const out=relistAdvice({offers:drifted,prices:prices(),costBasis:cost(),targetDurationMinutes:2880,now:NOW});

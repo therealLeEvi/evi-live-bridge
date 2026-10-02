@@ -50,7 +50,7 @@ const MAX_PUSHED_ITEMS=50;
 // bridge ever gets noticed: the plugin updates itself through the Hub, the bridge is a zip someone
 // downloaded once. Bump this whenever a release adds something a player would want and would
 // otherwise never hear about.
-export const BRIDGE_API=3;
+export const BRIDGE_API=4;
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const same=(a,b)=>typeof a==='string'&&a.length===b.length&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
@@ -86,8 +86,8 @@ export const AUTO_MIN_PROFIT=500;
 
 // ...and, where no minimum was set, a share of what the player is actually holding.
 //
-// 500 gp alone is a floor against absurdity, not against irrelevance. On 28 September 2026 novi had
-// 89m in hand and EVI was offering trades worth "anywhere from 500 gp to 12k": each one passed the
+// 500 gp alone is a floor against absurdity, not against irrelevance. On 28 September 2026 a player
+// with 89m in hand was offered trades worth "anywhere from 500 gp to 12k": each one passed the
 // floor, each one was real, and none of them was worth a Grand Exchange slot at that size. Their
 // words, and the right principle: it should always look at the cash stack.
 //
@@ -140,7 +140,7 @@ export const MAX_POSITIONS=3;
  * How many trades to suggest on this request: 1 unless the player has opted into more.
  *
  * Clamped rather than trusted. The parameter comes from a config dropdown today, but the endpoint is
- * reachable by anything holding the plugin key, and novi's standing objection is to EVI fanning out
+ * reachable by anything holding the plugin key, and the standing objection is to EVI fanning out
  * across the Grand Exchange: allocating a stack across eight trades divides the cash by eight, and an
  * eighth-sized trade cannot make the profit they trade for. So the ceiling lives here, on the server,
  * rather than resting on the dropdown only offering three.
@@ -427,6 +427,12 @@ export function createBridge({dir=path.join(root,'data'),port=51743,fetchText=nu
   //
   // A MEDIAN, not a mean: a mean is dragged by exactly the spike this exists to ignore.
   const TYPICAL_VOLUME_HOURS=168;
+  // Named rather than hardcoded, and DELIBERATELY not MIN_ROBUST_HOURS (6), which review flagged as
+  // a possible drift. They measure different quantities and want different floors: six readings give
+  // a usable median PRICE, but a volume median is what an order is SIZED from, and six hours cannot
+  // say what an item's typical hour is. Keeping them separate is the point; sharing a constant would
+  // couple a price floor to a sizing floor for no reason beyond looking tidy.
+  const MIN_TYPICAL_VOLUME_HOURS=24;
   let typicalVolumeCache=null;
   function typicalVolumesCached() {
     const now=Date.now();
@@ -454,7 +460,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743,fetchText=nu
     const out={};
     for(const [id,hl] of high) {
       // Too few hours to call anything typical -- fall back rather than invent one.
-      if(hl.length<24)continue;
+      if(hl.length<MIN_TYPICAL_VOLUME_HOURS)continue;
       // An order is limited by the thinner side of the book, so sizing must be too.
       const v=Math.min(med(hl),med(low.get(id)));
       // A zero is not published at all: sizingLiquidityFor falls back to the live hour for it, which
@@ -469,6 +475,34 @@ export function createBridge({dir=path.join(root,'data'),port=51743,fetchText=nu
     return typicalVolumeCache.volumes;
   }
   setTimeout(()=>{try{typicalVolumesCached();}catch{}},1500).unref?.();
+
+  // THE REQUEST PATH USES THIS, NEVER typicalVolumesCached DIRECTLY. Raised in review 2 Oct 2026 and
+  // measured, which is what moved it from "minor" to worth fixing now: a request arriving before both
+  // warm-up timers had fired paid for TWO blocking archive reads instead of one, and the headroom
+  // against the plugin's 2000ms readTimeout went from 1,250ms to 620ms (robust 750ms + typical 630ms,
+  // on a WARM file cache). The bridge autostarts at login, so the first poll after a reboot reads a
+  // COLD cache and is materially slower -- and a timeout there is not reported as slowness. The
+  // sidebar says "Bridge unreachable, check it's running and the pairing key matches", which is the
+  // misleading message this project has already had to fix once.
+  //
+  // So sizing never waits for the archive. A request takes whatever is cached, even if stale, and a
+  // refresh is scheduled for the next tick instead of being awaited. Before the first build that is
+  // null, which sizingLiquidityFor already treats as "no typical reading" and falls back to the live
+  // hour -- exactly the pre-2-Oct behaviour, for at most the first second and a half after a restart.
+  // Slightly less accurate sizing for one poll is an obviously better trade than a poll that times
+  // out and tells the player their bridge is unreachable.
+  let typicalVolumeRefreshing=false;
+  function typicalVolumesForRequest() {
+    const now=Date.now();
+    if(!typicalVolumeCache||now-typicalVolumeCache.at>=900000) {
+      // Fire-and-forget, and guarded so a burst of polls cannot queue a pile of archive reads.
+      if(!typicalVolumeRefreshing) {
+        typicalVolumeRefreshing=true;
+        setTimeout(()=>{try{typicalVolumesCached();}catch{}finally{typicalVolumeRefreshing=false;}},0).unref?.();
+      }
+    }
+    return typicalVolumeCache?typicalVolumeCache.volumes:null;
+  }
 
   // Warmed off the request path shortly after startup, because the FIRST poll after a restart must
   // not pay for a two-week median. The plugin's readTimeout is 2000ms and a timeout there is not
@@ -709,7 +743,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743,fetchText=nu
               // To be accurate about the mechanism, since an earlier version of this comment was not:
               // the Grand Exchange does NOT refuse such an offer. It accepts it and fills up to the
               // limit, then stalls until the four-hour window rolls over, then carries on. So the order
-              // is placeable and will eventually complete -- novi's own correction, and it is the reason
+              // is placeable and will eventually complete -- the maintainer's own correction, and it is the reason
               // this cap is a judgement rather than a correctness fix.
               //
               // The judgement: a quantity a player reads as "buy this now" should be the part that can
@@ -736,7 +770,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743,fetchText=nu
           // can be, which is the same physics whichever tier picked the item" -- so the typical-hour
           // reading belongs here rather than being threaded through six call sites. See
           // sizingLiquidityFor in suggestions.mjs for the measurement behind it.
-          const sizing={...sizingPolicy,typicalVolumes:typicalVolumesCached()};
+          const sizing={...sizingPolicy,typicalVolumes:typicalVolumesForRequest()};
           async function cushionForSuggestion(candidate) {
             try {
               const url2=`https://prices.runescape.wiki/api/v1/osrs/timeseries?id=${candidate.itemId}&timestep=5m`;
@@ -1225,7 +1259,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743,fetchText=nu
                 // untouched. Still a statement of what exists: it goes through none of the safety
                 // checks and is never something EVI tells anyone to buy.
                 // Every rung goes through the SAME checks the real path runs, which is the whole
-                // point and was got wrong first time round. Reported by novi on 28 Sept 2026, three
+                // point and was got wrong first time round. Reported by a player on 28 Sept 2026, three
                 // messages that contradicted one another: on Auto and on 200k it said "set it to
                 // 100,000 gp and the best this cash stack can do is 3rd Age robe, at about 441,621",
                 // and on 100,000 it said nothing passes and offered a Bronze arrow worth 812.
@@ -1300,7 +1334,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743,fetchText=nu
               }
             }
           }
-          // Auto never goes silent. Reported by novi on 28 Sept 2026: at Auto and at every explicit
+          // Auto never goes silent. Reported by a player on 28 Sept 2026: at Auto and at every explicit
           // tier EVI suggested nothing, and only "No minimum at all" produced anything -- "I think
           // that option should be the auto option but actually look at what's possible."
           //
@@ -1356,7 +1390,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743,fetchText=nu
           // More than one position at a time, only when the player has asked for it.
           //
           // The default is 1 and at 1 not a line of this runs, so the single-suggestion path above is
-          // exactly what it was. novi's objection to the original "plan all eight slots" idea still
+          // exactly what it was. The objection to the original "plan all eight slots" idea still
           // governs the design and is worth restating: allocating a stack across eight trades divides
           // the cash by eight, and an eighth-sized trade cannot make the profit they trade for. The
           // only form they would accept was "up to N, where the player chooses N, defaulting to 1",
@@ -1391,7 +1425,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743,fetchText=nu
             while(additional.length<wantPositions-1&&slotsLeft>0) {
               // The item just taken is now exposure, so the correlation check refuses a second
               // position correlated with the first -- two slots in correlated items are one bet
-              // wearing two hats, which was novi's own objection. And it is blocked from being
+              // wearing two hats, which was the maintainer's own objection. And it is blocked from being
               // picked again, since the same item twice is one position, not two.
               if(Number.isFinite(previous.itemId)) { exposure.add(previous.itemId); blocklist.add(previous.itemId); }
               const spend=budget;
@@ -1555,7 +1589,7 @@ export function createBridge({dir=path.join(root,'data'),port=51743,fetchText=nu
             offers:liveSells.map(o=>({itemId:o.itemId,name:o.name,price:o.price,remaining:Math.max(0,o.total-o.filled),firstSeen:o.firstSeen})),
             prices:relistPrices,costBasis,targetDurationMinutes:targetDurationMinutes??1440,
           });
-          // What this account is HOLDING, stated whatever the profit setting says -- novi, 30 Sept:
+          // What this account is HOLDING, stated whatever the profit setting says -- the maintainer, 30 Sept:
           // "it should be able to see it no matter the profit setting since it is a item we bought".
           // A separate question from "what should I do next", so a separate channel: the suggestion
           // slot still decides what to ADVISE, and holdingPreempts still governs that, unchanged.

@@ -1505,7 +1505,7 @@ test("focus: the plugin's own setting wins for its request, and 'same as scanner
   assert.equal(resolveFocus(null, undefined), 'any');
 });
 
-// -- Skipping positions that are already listed. Found on novi's own bridge, 29 Sept 2026: the
+// -- Skipping positions that are already listed. Found on a live bridge, 29 Sept 2026: the
 // picker returned the OLDEST open position and the caller then silenced it for being on the market,
 // but stopped there -- so a Cannon base listed since 00:02 hid three newer holdings behind it all
 // day, including 103 Black d'hide shields sitting unsold. The queue only advances when a position
@@ -1543,7 +1543,7 @@ test('persistent: the blocklist and the listed check both apply', () => {
   assert.equal(pick.itemId, 3, 'blocked and listed are both stepped over');
 });
 
-// -- An empty coin pouch is a real answer, not a missing one. Found by novi on 29 Sept 2026 after
+// -- An empty coin pouch is a real answer, not a missing one. Found by a player on 29 Sept 2026 after
 // banking their coins: EVI offered four 3rd Age robe tops at 131,812,123 each -- over half a billion
 // gp -- to a player carrying nothing. The guard was "maxSpend > 0", which treats a genuine zero as
 // "not supplied", and not supplied means no limit. The plugin already distinguishes the two: it
@@ -1574,7 +1574,7 @@ test('cash: zero cash stops the market tier too, not only the history tier', () 
 });
 
 // -- The idle-inventory tier must not claim an item was never bought when EVI holds its cost basis.
-// 30 Sept 2026, from novi's own suggestion log one minute apart: at minProfit 1 the HOLDING tier
+// 30 Sept 2026, from one player's own suggestion log one minute apart: at minProfit 1 the HOLDING tier
 // answered for Gilded d'hide vambraces with breakEven 4,183,673; at minProfit 1,000,000
 // holdingPreempts silenced it and this tier answered for the SAME item with breakEven null and the
 // sentence "no buy EVI ever observed for it -- likely a drop, a quest reward, or stock from before
@@ -1599,7 +1599,7 @@ test('idle stock excludes items EVI holds a cost basis for', () => {
 });
 
 // -- "Yours, not stock" is quantity-aware: only the SURPLUS above what you keep is stock. --
-// novi, 29 Sept 2026: "if I get an ancestral robe top for example as a drop, it will probably still
+// The maintainer, 29 Sept 2026: "if I get an ancestral robe top for example as a drop, it will probably still
 // not suggest to sell that one." Correct, and a design gap: marking an item hid EVERY unit of it for
 // ever, because "I own one of these for use" and "I never sell this item" were the same statement.
 test('only the surplus above what is kept for use is offered', () => {

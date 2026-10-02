@@ -66,7 +66,7 @@ const boughtThenSold = () => parseLog([
 ].join('\n')).records;
 
 test('a bought-then-sold pair becomes one flip, with the tax applied exactly once', () => {
-  const offers = buildOffers(boughtThenSold(), {account: 'novi'});
+  const offers = buildOffers(boughtThenSold(), {account: 'player-one'});
   assert.equal(offers.length, 2);
   const sale = offers.find(o => o.state === 'SOLD');
   // Exchange Logger reports a sale's worth already net of tax; EVI's matcher takes tax off itself,
@@ -82,8 +82,8 @@ test('a bought-then-sold pair becomes one flip, with the tax applied exactly onc
 });
 
 test('the same file imported twice produces the same fingerprints, so nothing is counted twice', () => {
-  const a = flipsFrom(buildOffers(boughtThenSold(), {account: 'novi'})).flips.map(f => f.fp);
-  const b = flipsFrom(buildOffers(boughtThenSold(), {account: 'novi'})).flips.map(f => f.fp);
+  const a = flipsFrom(buildOffers(boughtThenSold(), {account: 'player-one'})).flips.map(f => f.fp);
+  const b = flipsFrom(buildOffers(boughtThenSold(), {account: 'player-one'})).flips.map(f => f.fp);
   assert.deepEqual(a, b);
 });
 
@@ -94,7 +94,7 @@ test('a purchase whose placement is not in the file is left out rather than inve
     plain('10:06:00', 'SELL', 0, 2351, 'Iron bar', ' max: 10 offer: 200'),
     plain('10:30:00', 'SOLD', 0, 2351, 'Iron bar', ' qty: 10 worth: 1960 tax: 40'),
   ].join('\n'));
-  const offers = buildOffers(records, {account: 'novi'});
+  const offers = buildOffers(records, {account: 'player-one'});
   const buy = offers.find(o => o.state === 'BOUGHT');
   assert.equal(buy.knownStart, false);
   const {flips, unmatchedSells} = flipsFrom(offers);
@@ -107,7 +107,7 @@ test('a sale with no purchase behind it is reported, never counted as profit', (
     plain('10:00:00', 'SELL', 1, 2351, 'Iron bar', ' max: 5 offer: 200'),
     plain('10:30:00', 'SOLD', 1, 2351, 'Iron bar', ' qty: 5 worth: 980 tax: 20'),
   ].join('\n'));
-  const {flips, unmatchedSells} = flipsFrom(buildOffers(records, {account: 'novi'}));
+  const {flips, unmatchedSells} = flipsFrom(buildOffers(records, {account: 'player-one'}));
   assert.equal(flips.length, 0);
   assert.equal(unmatchedSells.length, 1);
 });
@@ -117,7 +117,7 @@ test('stock still held shows as a position, not as a completed trade', () => {
     plain('10:00:00', 'BUY', 2, 2351, 'Iron bar', ' max: 10 offer: 100'),
     plain('10:05:00', 'BOUGHT', 2, 2351, 'Iron bar', ' qty: 10 worth: 1000 tax: 0'),
   ].join('\n'));
-  const {flips, openPositions} = flipsFrom(buildOffers(records, {account: 'novi'}));
+  const {flips, openPositions} = flipsFrom(buildOffers(records, {account: 'player-one'}));
   assert.equal(flips.length, 0);
   assert.equal(openPositions.length, 1);
   assert.equal(openPositions[0].remaining, 10);
@@ -130,7 +130,7 @@ test('a cancelled offer that partly filled still counts for what it filled', () 
     plain('10:25:00', 'SELL', 0, 2351, 'Iron bar', ' max: 4 offer: 200'),
     plain('10:40:00', 'SOLD', 0, 2351, 'Iron bar', ' qty: 4 worth: 784 tax: 16'),
   ].join('\n'));
-  const {flips} = flipsFrom(buildOffers(records, {account: 'novi'}));
+  const {flips} = flipsFrom(buildOffers(records, {account: 'player-one'}));
   assert.equal(flips.length, 1);
   assert.equal(flips[0].quantity, 4);
   assert.equal(flips[0].profit, 384);
@@ -143,7 +143,7 @@ test('one slot reused for a different item does not merge the two offers', () =>
     plain('10:06:00', 'BUY', 0, 1515, 'Yew logs', ' max: 5 offer: 300'),
     plain('10:09:00', 'BOUGHT', 0, 1515, 'Yew logs', ' qty: 5 worth: 1500 tax: 0'),
   ].join('\n'));
-  const offers = buildOffers(records, {account: 'novi'});
+  const offers = buildOffers(records, {account: 'player-one'});
   assert.equal(offers.length, 2);
   assert.deepEqual(offers.map(o => o.itemId).sort((a, b) => a - b), [1515, 2351]);
   assert.ok(offers.every(o => o.knownStart), 'both were seen from the moment they were placed');
@@ -158,7 +158,7 @@ test('the summary says what was read and, just as plainly, what was left out', (
     plain('11:00:00', 'SELL', 1, 1515, 'Yew logs', ' max: 5 offer: 300'),
     plain('11:30:00', 'SOLD', 1, 1515, 'Yew logs', ' qty: 5 worth: 1470 tax: 30'),
   ].join('\n'));
-  const offers = buildOffers(records, {account: 'novi'});
+  const offers = buildOffers(records, {account: 'player-one'});
   const {flips, openPositions, unmatchedSells} = flipsFrom(offers);
   const s = summarise({records, unreadable, offers, flips, openPositions, unmatchedSells});
   assert.equal(s.flips, 1);

@@ -61,12 +61,14 @@ test('quantity cannot launder a thin edge past the minimum profit floor', () => 
 });
 
 test('a personal track record does not excuse an edge under half the tax', () => {
-  const flips = [{itemId: 565, item: 'Blood rune', quantity: 3411, capital: 1156329,
-    netProceeds: 1169973, profit: 13644, firstBuy: 1, lastSell: 2, hold: 0.09}];
+  // A profitable flip on this item is all the test needs; the figures are invented rather than taken
+  // from anyone's journal, since a quantity and a capital together describe how someone trades.
+  const flips = [{itemId: 565, item: 'Blood rune', quantity: 2000, capital: 670000,
+    netProceeds: 682000, profit: 12000, firstBuy: 1, lastSell: 2, hold: 0.09}];
   const thin = {'565': {high: 343, low: 335, highTime: 1, lowTime: 1}};
   const vols = {'565': {highPriceVolume: 1168281, lowPriceVolume: 333402}};
   assert.equal(computeSuggestion(flips, thin, Date.now(), {volumes: vols, maxSpend: 50_000_000}), null,
-    'novi flipped blood runes once for +13,644; that does not make a 2 gp edge survive a 1 gp tick');
+    'one profitable blood-rune flip does not make a 2 gp edge survive a 1 gp tick');
 });
 
 test('a margin under the tax at the SUPPORTED price is held back, never shown as a last resort', async () => {

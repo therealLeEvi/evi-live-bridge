@@ -23,7 +23,7 @@ const setup = t => {
 const AT = (h, m) => Date.UTC(2026, 8, 27, h, m);
 // One packet carrying whatever offers are in the slots at that moment.
 const send = (store, seq, ts, offers) => store.apply({type: 'packet', received: ts, packet: {
-  version: 1, session: 's1', account: 'novi', seq, ts, loggedIn: true, offers,
+  version: 1, session: 's1', account: 'player-one', seq, ts, loggedIn: true, offers,
 }});
 const buy = (filled, state, ticksToFill) => ({slot: 0, state, offerId: 'buy-1', itemId: ID, name: NAME,
   price: 25000, total: 48, filled, spent: filled * 25000, knownStart: true, ticksToFill});
@@ -98,7 +98,7 @@ test('heartbeats after a cancel do not grow the journal, even though we kept a b
     const slots = Array.from({length: 8}, (_, slot) => ({slot, state: 'EMPTY', offerId: 'empty-' + slot,
       itemId: 0, name: '', price: 0, total: 0, filled: 0, spent: 0, knownStart: false}));
     for (const o of offers) slots[o.slot] = o;
-    store.ingest({version: 1, session: 's1', account: 'novi', seq, ts, loggedIn: true, offers: slots}, ts + 1000);
+    store.ingest({version: 1, session: 's1', account: 'player-one', seq, ts, loggedIn: true, offers: slots}, ts + 1000);
   };
   snapshot(1, AT(22, 24), [buy(0, 'BUYING', -1)]);
   snapshot(2, AT(23, 43), [buy(1, 'BUYING', 7953)]);

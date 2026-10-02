@@ -11,7 +11,8 @@
 // is dead" warning, resting on a figure recorded 29 Sept: no observed buy gained a unit after
 // six hours, which was called arithmetic rather than a forecast. Re-measured on 1 Oct with
 // tools/buy-gain-timing.mjs, that figure turned out to be an ARTIFACT. Packets only arrive while
-// RuneLite is open, and novi plays in sessions: only 45 of 923 buy offers were ever observed for more
+// RuneLite is open, and the player whose journal this was measured on plays in sessions: only 45 of
+// 923 buy offers were ever observed for more
 // than an hour, and the longest any offer was watched at all is 4.51 hours. Nothing was watched past
 // six hours, so of course nothing was seen to gain after six hours. The journal cannot answer the
 // question, and a six-hour threshold would have been a prediction wearing arithmetic's clothes.

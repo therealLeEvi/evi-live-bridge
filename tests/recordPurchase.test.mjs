@@ -16,7 +16,7 @@ const setup = t => {
 };
 const BOUGHT_AT = Date.UTC(2026, 8, 26, 1, 19); // 26 Sep 2026, the real case this came from
 const purchase = {itemId: 28919, name: 'Tonalztics of Ralos (uncharged)', quantity: 1,
-  unitPrice: 45144802, at: BOUGHT_AT, account: 'novi'};
+  unitPrice: 45144802, at: BOUGHT_AT, account: 'player-one'};
 
 test('a recorded purchase becomes stock EVI knows the cost of', t => {
   const {store} = setup(t);
@@ -41,7 +41,7 @@ test('a later sale matches against it and becomes a completed trade, not an unma
   store.recordPurchase(purchase);
   // The sale EVI does observe, at the price this item was actually listed for.
   store.apply({type: 'packet', received: BOUGHT_AT + 9 * 3600000, packet: {
-    version: 1, session: 's1', account: 'novi', seq: 1, ts: BOUGHT_AT + 9 * 3600000, loggedIn: true,
+    version: 1, session: 's1', account: 'player-one', seq: 1, ts: BOUGHT_AT + 9 * 3600000, loggedIn: true,
     offers: [{slot: 0, state: 'SOLD', offerId: 'sell-1', itemId: 28919,
       name: 'Tonalztics of Ralos (uncharged)', price: 47897417, total: 1, filled: 1,
       spent: 47897417, knownStart: true}],

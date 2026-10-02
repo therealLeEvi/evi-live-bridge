@@ -7,14 +7,14 @@ const buckets = [{ts: H, d: {'4151': [1_010_000, 400, 990_000, 300], '2': [250, 
 const at = min => H * 1000 + min * 60000;
 
 test('share preview: describes an offer without its account, exact price, quantity or time of day', () => {
-  const o = {offerId: 'secret-id', account: 'novi-salt', itemId: 4151, state: 'BOUGHT', price: 995_000, total: 20, filled: 20,
+  const o = {offerId: 'secret-id', account: 'account-salt', itemId: 4151, state: 'BOUGHT', price: 995_000, total: 20, filled: 20,
     firstSeen: at(10), completedAt: at(10 + 90), knownStart: true};
   const {records, sentAnywhere} = sharePreview([o], buckets);
   assert.equal(sentAnywhere, false);
   assert.deepEqual(records, [{itemId: 4151, side: 'buy', placedDay: '2026-09-18', priceVsMarketPct: -0.5,
     size: 'small (1-10%)', outcome: 'filled', filledShare: 1, took: '1-4 h'}]);
   const text = JSON.stringify(records);
-  for (const leak of ['secret-id', 'novi-salt', '995000', '14:', 'T1']) assert.ok(!text.includes(leak), 'leaked ' + leak);
+  for (const leak of ['secret-id', 'account-salt', '995000', '14:', 'T1']) assert.ok(!text.includes(leak), 'leaked ' + leak);
 });
 
 test('share preview: offers it cannot describe honestly are counted as left out, never guessed at', () => {

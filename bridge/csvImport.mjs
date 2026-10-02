@@ -70,7 +70,7 @@ export function parseTime(value,format='iso',offsetMinutes=0) {
   return n;
 }
 
-const aliases={item:['item','item name','name'],profit:['profit','net profit','profit after tax'],capital:['capital','buy total','total cost'],// 'sold' earns its place from a real export: the tracker novi uses names its two quantity columns
+const aliases={item:['item','item name','name'],profit:['profit','net profit','profit after tax'],capital:['capital','buy total','total cost'],// 'sold' earns its place from a real export: the tracker it came from names its two quantity columns
 // "Bought" and "Sold", so none of the obvious names appeared and the file was refused outright.
 // Only 'sold' is listed, deliberately -- suggestMapping accepts a field only when exactly ONE
 // heading matches it, so adding 'bought' as well would make a file carrying both ambiguous and
@@ -82,7 +82,7 @@ quantity:['quantity','qty','sold','units','amount'],buyPrice:['avg. buy price','
  *
  * Built from a real export: it lists "Varrock teleport", "Teleport to house" and "Tall box hedge",
  * while the catalogue calls them "Varrock teleport (tablet)" and "Tall box hedge (bagged)". Five of
- * novi's 68 traded items went unresolved for that reason alone, and silently.
+ * the 68 traded items in that export went unresolved for that reason alone, and silently.
  *
  * So an exact name wins, and failing that a name is accepted only when EXACTLY ONE catalogue entry is
  * that name followed by a parenthesis. That restraint is the whole point rather than a nicety: of the

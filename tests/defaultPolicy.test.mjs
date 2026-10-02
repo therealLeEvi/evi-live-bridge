@@ -165,7 +165,7 @@ test('the headline profit is never a figure EVI has already measured as false', 
 });
 
 test('one suggestion is the default, and the ceiling is the server\'s not the dropdown\'s', () => {
-  // novi's standing objection to EVI fanning out across the Grand Exchange: allocating a stack across
+  // The standing objection to EVI fanning out across the Grand Exchange: allocating a stack across
   // eight trades divides the cash by eight, and an eighth-sized trade cannot make the profit they
   // trade for. The only form accepted was "up to N, where the player chooses N, defaulting to 1".
   // A default install sends no parameter at all and must land on exactly one.
@@ -177,7 +177,7 @@ test('one suggestion is the default, and the ceiling is the server\'s not the dr
   assert.equal(positionsWanted(new URLSearchParams('maxSuggestions=3')), 3);
 
   // The ceiling is enforced HERE, not by the dropdown only offering three: this endpoint is reachable
-  // by anything holding the plugin key, and eight slots of EVI's choosing is the thing novi ruled out.
+  // by anything holding the plugin key, and eight slots of EVI's choosing is the thing that was ruled out.
   assert.equal(MAX_POSITIONS, 3);
   for (const greedy of ['8', '99', '1000000'])
     assert.equal(positionsWanted(new URLSearchParams('maxSuggestions=' + greedy)), 3, greedy);
@@ -190,7 +190,7 @@ test('one suggestion is the default, and the ceiling is the server\'s not the dr
 });
 
 test('the Auto target is a preference, not a gate: an explicit tier is the opposite', () => {
-  // Reported by novi on 28 Sept 2026: EVI suggested nothing at Auto and nothing at every explicit
+  // Reported by a player on 28 Sept 2026: EVI suggested nothing at Auto and nothing at every explicit
   // tier, and "No minimum at all" was the only setting that produced anything. That is the shape of
   // the fault, and it is a trap as well as an annoyance: MinProfitTier.NONE switches the
   // margin-over-tax check off too, so silence above it pushes a player into giving up a real safety

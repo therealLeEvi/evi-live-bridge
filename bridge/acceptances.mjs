@@ -7,7 +7,7 @@
 // from "this profit happened while EVI was running". Measured on 29 Sept 2026 the difference is not
 // academic: 302 of 1,659 suggestions looked "acted on", and nobody could say how many really were.
 //
-// novi's goal for EVI is that a user can trust a suggestion without checking it first, and a claim
+// The goal for EVI is that a user can trust a suggestion without checking it first, and a claim
 // like "of the suggestions taken, X% profited, the worst was Y" is the only form of that trust which
 // survives contact with someone else's GP. It cannot be made honestly from an inference.
 //

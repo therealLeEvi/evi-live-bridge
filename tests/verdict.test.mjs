@@ -1,7 +1,7 @@
 // The sidebar used to state a number and bury whether EVI trusted it.
 //
-// On 28 September 2026 novi bought 30 Contract of Glyphic Attenuation expecting the 2,977,560 gp the
-// quoted spread implied. It was worth about 350,000 -- 313 buyers over twelve hours had paid an average
+// On 28 September 2026 a player bought a batch of Contract of Glyphic Attenuation expecting roughly
+// the 3m gp the quoted spread implied. It was worth about 350,000 -- 313 buyers over twelve hours had paid an average
 // of 373,612 -- and EVI knew: it had demoted the pick and said so, in the middle of a paragraph. The
 // number was visible and the doubt was not. suggestionVerdict gives the doubt its own shape.
 import {test} from 'node:test';
@@ -93,8 +93,8 @@ test('lines stay short enough for a 225px panel', () => {
 
 // -- Holdings and idle stock. Before 30 Sept 2026 neither drew a card at all: the only sell that
 // produced a verdict was one at a LOSS, so your own stock got a card exactly when the news was bad
-// and a plain paragraph when it was good. novi reported it against a Gilded d'hide vambraces worth
-// +254,063 sitting in prose beside buy picks drawn as cards. --
+// and a plain paragraph when it was good. Reported against a Gilded d'hide vambraces whose gain sat
+// in prose beside buy picks drawn as cards. --
 
 const holding = (over = {}) => ({itemId: 23261, name: "Gilded d'hide vambraces", action: 'sell',
   source: 'holding', quantity: 1, buyPrice: 4100000, sellPrice: 4442921,

@@ -20,9 +20,9 @@ import {createBridge} from '../bridge/server.mjs';
 
 const CSV = [
   'Item,Quantity,Avg. buy price,Profit,First buy time,Last sell time,Account',
-  'Blood rune,3411,339,13644,2026-09-13T11:31:27Z,2026-09-13T11:36:57Z,le evi',
-  'Mage\'s book,1,158781,158781,2026-09-14T08:00:00Z,2026-09-14T19:30:00Z,le evi',
-  '"Ranger\'s tunic, worn",2,1000,-500,2026-09-15T08:00:00Z,2026-09-15T09:00:00Z,le evi',
+  'Blood rune,2000,300,12000,2026-09-13T11:31:27Z,2026-09-13T11:36:57Z,player-one',
+  'Mage\'s book,1,150000,150000,2026-09-14T08:00:00Z,2026-09-14T19:30:00Z,player-one',
+  '"Ranger\'s tunic, worn",2,1000,-500,2026-09-15T08:00:00Z,2026-09-15T09:00:00Z,player-one',
 ].join('\n');
 
 test('csv import: a quoted field containing a comma stays one field', () => {
@@ -66,8 +66,8 @@ test('csv import: capital is derived from quantity and price, never invented', (
   const {records, errors} = previewTable(table, suggestMapping(table[0]), {profitMeaning: 'after-tax', source: 'test'});
   assert.equal(errors.length, 0);
   assert.equal(records.length, 3);
-  assert.equal(records[0].capital, 3411 * 339, 'quantity times price, since no total column was given');
-  assert.equal(records[0].profit, 13644);
+  assert.equal(records[0].capital, 2000 * 300, 'quantity times price, since no total column was given');
+  assert.equal(records[0].profit, 12000);
   assert.equal(records[0].boughtAt, Date.parse('2026-09-13T11:31:27Z'));
   assert.equal(records[2].profit, -500, 'a loss stays a loss');
   assert.equal(records[2].loss, true);
@@ -113,7 +113,7 @@ test('csv import: numbers and times survive the formats trackers actually use', 
 });
 
 test('csv import: a real export\'s own column names are recognised', () => {
-  // The headings from novi's actual tracker export, which is how this was found: it names its two
+  // The headings from a real tracker export, which is how this was found: it names its two
   // quantity columns "Bought" and "Sold", so none of quantity/qty appeared and the whole file was
   // refused. Only "Sold" is an alias, deliberately -- suggestMapping needs exactly one match, so
   // accepting "Bought" too would make this very file ambiguous again.
@@ -157,7 +157,7 @@ test('csv import: a row still in progress is not finished, not broken', () => {
 
 test('itemResolver: a shortened name resolves only when it is unambiguous', () => {
   // Trackers export "Varrock teleport" where the catalogue says "Varrock teleport (tablet)". Five of
-  // novi's 68 traded items went unresolved for that alone. But the restraint is the point: across the
+  // the 68 traded items in one real export went unresolved for that alone. But the restraint is the point: across the
   // real catalogue, 190 of the 487 base names have more than one parenthetical variant, and picking
   // the wrong one would teach EVI a history that never happened.
   const resolve = itemResolver([
@@ -220,17 +220,17 @@ test('importFlips: the same trade cannot arrive twice by two different routes', 
   // A fingerprint only catches a re-import through the same door. The private tool writes
   // "copilot|item|times|..." and the CSV path writes 'generic:["csv <file>",...]', so the same trade
   // arriving the other way has a fingerprint that can never match -- and would double-weight that item
-  // in every ranking afterwards, silently. Checked on novi's own data: their flips.csv happened not to
+  // in every ranking afterwards, silently. Checked on one real export: its flips.csv happened not to
   // overlap the earlier import (that one stops 12 Sept, the file starts the 18th), so nothing had gone
   // wrong yet, but only by luck.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'evi-crossroute-'));
   t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
   const store = new Store(dir);
-  const trade = {itemId: 565, item: 'Blood rune', quantity: 3411, capital: 1156329, profit: 13644,
-    firstBuy: 1789383383086, lastSell: 1789383710123, account: 'le evi'};
+  const trade = {itemId: 565, item: 'Blood rune', quantity: 2000, capital: 600000, profit: 12000,
+    firstBuy: 1789383383086, lastSell: 1789383710123, account: 'player-one'};
 
   // Arrives first through the private tool's scheme.
-  assert.equal(store.importFlips({source: 'copilot', flips: [{...trade, fp: 'copilot|blood rune|a|b|3411|3411'}]}).accepted, 1);
+  assert.equal(store.importFlips({source: 'copilot', flips: [{...trade, fp: 'copilot|blood rune|a|b|2000|2000'}]}).accepted, 1);
   // Then the very same trade through the CSV path, different source, different fingerprint entirely.
   const second = store.importFlips({source: 'csv flips.csv', flips: [{...trade, fp: 'generic:["csv flips.csv","sig"]'}]});
   assert.equal(second.accepted, 0, 'the content is already there, whatever describes it');
@@ -256,7 +256,7 @@ test('importFlips: the same trade cannot arrive twice by two different routes', 
 
   // And removing an import takes its content keys with it, so the same file can be imported again.
   store.importFlips({source: 'copilot', remove: true});
-  const readded = store.importFlips({source: 'copilot', flips: [{...trade, fp: 'copilot|blood rune|a|b|3411|3411'}]});
+  const readded = store.importFlips({source: 'copilot', flips: [{...trade, fp: 'copilot|blood rune|a|b|2000|2000'}]});
   assert.equal(readded.accepted, 1, 'undoing an import must really undo it');
 });
 

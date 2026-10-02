@@ -2,8 +2,9 @@ import {estimateUnitTax} from './tax.mjs';
 
 // What EVI thinks of its own suggestion, as something the sidebar can draw rather than prose to read.
 //
-// Asked for on 28 September 2026 after novi bought 30 Contract of Glyphic Attenuation expecting the
-// 2,977,560 gp the quoted spread implied. It was worth about 350,000: 313 buyers over twelve hours had
+// Asked for on 28 September 2026 after a player bought a batch of Contract of Glyphic Attenuation
+// expecting roughly the 3m gp the quoted spread implied. It was worth about 350,000: 313 buyers over
+// twelve hours had
 // paid an average of 373,612, and EVI knew -- it had demoted the pick and said so, in the middle of a
 // paragraph. The number was visible and the doubt was not.
 //
@@ -51,7 +52,7 @@ export function suggestionVerdict(suggestion) {
 
   // A holding that is NOT a loss. Without this, the only holding that ever got a card was one being
   // sold at a loss (the branch above), so your own stock drew a card exactly when the news was bad
-  // and fell back to a paragraph when it was good -- which is the wrong way round, and is what novi
+  // and fell back to a paragraph when it was good -- which is the wrong way round, and is what a player
   // saw on 30 Sept: a Gilded d'hide vambraces worth +254,063 rendered as prose beside buy picks
   // rendered as cards. Every figure here is one the holding tier already computed.
   if (suggestion.source === 'holding' && Number.isFinite(suggestion.netIfSoldNow) && suggestion.netIfSoldNow >= 0) {

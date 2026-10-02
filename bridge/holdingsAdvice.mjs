@@ -3,7 +3,7 @@ import {estimateUnitTax} from './tax.mjs';
 
 // "Here is what you are holding." -- every tracked position, always, whatever the profit setting.
 //
-// Asked for by novi on 30 September 2026, in the words that name the actual problem: "I do think it
+// Asked for by the maintainer on 30 September 2026, in the words that name the actual problem: "I do think it
 // should be able to see it no matter the profit setting since it is a item we bought, is it possible
 // to make those two separate?"
 //
@@ -15,7 +15,7 @@ import {estimateUnitTax} from './tax.mjs';
 // was invisible, and the richer the player's settings get the more of their own stock disappears.
 //
 // The measurement said not to fix that by lowering the bar (tools/holding-gate.mjs, 150 positions of
-// novi's own): mentioning more holdings in the SUGGESTION slot would have cost GP, because selling a
+// one player's): mentioning more holdings in the SUGGESTION slot would have cost GP, because selling a
 // position the first hour it clears a low bar is worse than waiting. Two of the three candidate rules
 // were ruled out outright -- a per-item tax multiple spends 29% of its words on stock worth under
 // 10,000 gp, and no bar at all spends 37%, which is the 152 gp pie the rule exists to prevent.

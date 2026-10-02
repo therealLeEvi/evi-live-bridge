@@ -53,7 +53,7 @@ test('no minimum set leaves the old behaviour exactly as it was', () => {
 
 test('what counts as "on the market" is the live slot snapshot, not the journal', () => {
   // The journal keeps an offer's state until the bridge SEES it end, so anything cancelled or
-  // collected while the bridge was down stays SELLING for ever. On novi's journal, 28 Sept: 64 offers
+  // collected while the bridge was down stays SELLING for ever. On one player's journal, 28 Sept: 64 offers
   // still marked open while the plugin was reporting 8 -- the Grand Exchange's entire capacity -- with
   // 33 SELLING records over 29 distinct items whose last refresh was more than a day earlier, the
   // oldest 343 hours. Reading those as "already listed" silences the holding reminder for 29 items the
@@ -82,7 +82,7 @@ test('what counts as "on the market" is the live slot snapshot, not the journal'
 });
 
 // -- "Best of both" compares two BUYS, never a buy against stock you already own. --
-// 30 Sept 2026: novi held 1 Gilded d'hide vambraces with four free slots and could not get EVI to
+// 30 Sept 2026: a player held one Gilded d'hide vambraces with free slots and could not get EVI to
 // mention it even at "No minimum at all" -- which bypasses holdingPreempts and lands on this gate
 // instead. The bridge's own logged reason: "Your own Gilded d'hide vambraces is worth about 209,700
 // gp ... against 1,114,253 gp for this market-wide pick, so EVI set your history aside this time."

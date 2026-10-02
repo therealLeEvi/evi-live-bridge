@@ -262,7 +262,7 @@ test('imported flips rank suggestions but never change the observed-profit total
   at(store,packet(1,[offer({offerId:'buy-1'})],{ts:T0}));
   at(store,packet(2,[offer({offerId:'buy-1',state:'BOUGHT',filled:10,spent:1000})],{ts:T0+1000}));
   const before=store.state(T0+2000);
-  const flip=(o={})=>({fp:'copilot|whip|1',itemId:4151,item:'Abyssal whip',quantity:2,capital:2000000,profit:150000,firstBuy:T0-86400000,lastSell:T0-80000000,account:'le evi',...o});
+  const flip=(o={})=>({fp:'copilot|whip|1',itemId:4151,item:'Abyssal whip',quantity:2,capital:2000000,profit:150000,firstBuy:T0-86400000,lastSell:T0-80000000,account:'player-one',...o});
   const r=store.importFlips({source:'copilot',flips:[flip(),flip({fp:'copilot|nails|1',itemId:1,item:'Rune nails',quantity:100,capital:10000,profit:2000})]});
   assert.equal(r.accepted,2);
   const s=store.state(T0+3000);

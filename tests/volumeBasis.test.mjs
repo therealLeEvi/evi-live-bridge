@@ -236,3 +236,66 @@ test('end to end: a real bridge sizes a spike hour off the archive, not off the 
   assert.equal(archived.quantity, 40, 'sized off the typical hour the archive records, not the spike');
   assert.ok(archived.quantity < bare.quantity / 10, 'the whole point: the spike no longer sets the order size');
 });
+
+test('end to end: the FIRST request after a restart does not wait for the archive', async t => {
+  // RAISED IN REVIEW, 2 Oct 2026, and measured before being believed. Every suggestion request read
+  // the typical-volume cache, which is filled by its own timer at 1,500ms -- separate from the price
+  // cache's at 1,000ms. A request arriving before both had fired paid for TWO blocking archive reads
+  // instead of one, and the headroom against the plugin's 2,000ms readTimeout fell from 1,250ms to
+  // 620ms on a WARM file cache. The bridge autostarts at login, so the first poll after a reboot
+  // reads a cold one. A timeout there is not reported as slowness: the sidebar says "Bridge
+  // unreachable", which is the misleading message this project has already had to fix once.
+  //
+  // THE ASSERTION NEEDS NO TIMING, which is the point -- a wall-clock bound would be flaky on a busy
+  // machine and would prove less. If the first request had waited for the archive it would HAVE the
+  // typical reading and size at 40. Getting the live-hour fallback instead is positive proof that it
+  // did not block, and that failing open lands on exactly the pre-change behaviour.
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const zlib = await import('node:zlib');
+  const {createBridge} = await import('../bridge/server.mjs');
+
+  const nowS = Math.floor(Date.now() / 1000);
+  const ID = 19625, K = String(ID);
+  const lines = [];
+  for (let i = 200; i >= 1; i--) {
+    const ts = (Math.floor(nowS / 3600) - i) * 3600;
+    const v = i === 1 ? 2000 : 40;
+    lines.push(JSON.stringify({ts, d: {[K]: [180, v, 100, v]}}));
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'evi-coldstart-'));
+  const archiveDir = path.join(dir, 'price-archive');
+  fs.mkdirSync(archiveDir, {recursive: true});
+  fs.writeFileSync(path.join(archiveDir, '1h-' + new Date(nowS * 1000).toISOString().slice(0, 7) + '.jsonl.gz'),
+    Buffer.concat(lines.map(l => zlib.gzipSync(l + String.fromCharCode(10)))));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+
+  const fetchText = url => {
+    if (url.includes('/mapping')) return JSON.stringify([{id: ID, name: 'Thing', limit: 100000, members: false, value: 1}]);
+    if (url.includes('/latest')) return JSON.stringify({data: {[K]: {high: 180, highTime: nowS - 30, low: 100, lowTime: nowS - 30}}});
+    if (url.includes('/1h')) return JSON.stringify({data: {[K]: {avgHighPrice: 180, highPriceVolume: 2000, avgLowPrice: 100, lowPriceVolume: 2000}}});
+    if (url.includes('/timeseries')) return JSON.stringify({data: []});
+    return '{}';
+  };
+  const app = createBridge({dir, port: 51771, fetchText});
+  await new Promise(r => app.server.listen(51771, '127.0.0.1', r));
+  t.after(async () => { await new Promise(r => app.server.close(r)); });
+
+  const ask = async () => {
+    const r = await fetch(app.origin + '/api/suggestion?account=test&includeMarket=1&minProfit=1&cash=50000000&duration=720',
+      {headers: {Authorization: 'Bearer ' + app.secrets.plugin}});
+    assert.equal(r.status, 200);
+    return (await r.json()).suggestion;
+  };
+
+  // Immediately, before either warm-up timer has had a chance to fire.
+  const first = await ask();
+  assert.ok(first, 'the first request must still be answered');
+  assert.equal(first.quantity, 2000,
+    'the live hour, i.e. it did NOT block on the archive -- a blocking read would have sized this at 40');
+
+  // Once the cache is warm the typical hour takes over, so failing open is temporary, not permanent.
+  await new Promise(r => setTimeout(r, 2500));
+  assert.equal((await ask()).quantity, 40, 'the typical hour takes over once it is built off the request path');
+});

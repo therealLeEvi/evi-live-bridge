@@ -595,7 +595,7 @@ async function loadPredictions(){
   // whole press lands in roughly ten to fifteen seconds -- call it **six or seven requests a
   // second**, not the one a second the Wiki suggests as a rule of thumb.
   //
-  // It is left at that rate on purpose (novi's call, 26 Sept 2026). One request at a time would
+  // It is left at that rate on purpose (a deliberate call, 26 Sept 2026). One request at a time would
   // honour the rule of thumb and take about ninety seconds, which is a worse button, and this only
   // fires when someone presses it. Two things keep it defensible: it never runs on its own, and a
   // repeat press inside five minutes reaches the bridge's cache instead of the Wiki (that window is
@@ -707,12 +707,12 @@ function buildRows(mapping, latest, m5, h1){
     const absVol=clamp(Math.log1p(v1)/Math.log(10001));
     const liq=20*clamp(.52*absVol+.48*clamp(turnover/1.25));
     const histScore=personalScore(hist);
-    // The 15-point "expected absolute profit" component was REMOVED on 2026-09-26, at novi's
+    // The 15-point "expected absolute profit" component was REMOVED on 2026-09-26, at the
     // decision, after it was measured: see the README entry. It rewarded a large absolute profit,
     // which on any given day means a big position in something illiquid -- the same failure that
     // took the bridge's personal ranking down -- and it double-counted the minimum-profit setting
     // the player already controls. Removing it roughly doubled the median trade, halved the capital
-    // left unsold, and cut the worst trade from -4,111,256 to -107,670 at novi's own scale.
+    // left unsold, and cut the worst trade from -4,111,256 to -107,670 at a large-stack scale.
     // `expected` itself is untouched: it is still computed, shown in the table and sortable.
 
     let holdScore=holdFitScore(mode, suggestionPrefs.timeframe?holdingPeriodMode(suggestionPrefs.timeframe):null);

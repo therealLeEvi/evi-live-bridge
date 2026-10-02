@@ -8,7 +8,7 @@ const VAMBRACES = {itemId: 23261, item: "Gilded d'hide vambraces", remaining: 1,
 const PRICES = {23261: {high: 4442921}, 34428: {high: 1550000}, 6697: {high: 60}};
 
 test('a holding is stated whatever the profit setting is -- there is no profit bar here', () => {
-  // The whole point. novi's minimum was 1,000,000 and this position nets 254,063, so the suggestion
+  // The whole point. At a 1,000,000 minimum a position netting 254,063 is below the bar, so the suggestion
   // slot is silent about it by design. This channel takes no minimum profit at all: it cannot be
   // passed one, which is the strongest way to guarantee the two stay separate.
   const [line] = holdingsAdvice({positions: [VAMBRACES], prices: PRICES});
@@ -17,7 +17,7 @@ test('a holding is stated whatever the profit setting is -- there is no profit b
   assert.equal(line.cost, 4100000);
   assert.ok(line.net > 0 && line.net < 300000, 'net after tax, not the gross sale price: ' + line.net);
   // The card carries the name, quantity and net; the sentence carries only what it cannot fit.
-  // Shortened 1 Oct 2026 -- novi: "some of the messages are quite long".
+  // Shortened 1 Oct 2026, after a report that the sidebar messages were too long.
   assert.match(line.figures, /1 · \+254,063 after tax/, 'the card shows the quantity and the net');
   assert.match(line.message, /Bought for 4,100,000/);
   assert.match(line.message, /Break-even/);

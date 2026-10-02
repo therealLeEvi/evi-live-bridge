@@ -1,7 +1,7 @@
 // A 12-hour sell-support average has no sense of time WITHIN its window, so a short burst at high
 // volume can leave it describing a market that has already passed.
 //
-// novi, 1 Oct 2026: offered 278 Ape atoll teleports to buy at 10,051 and sell at 20,000. The support
+// Found 1 Oct 2026: a buy of Ape atoll teleports offered at 10,051 to sell at 20,000. The support
 // said 7,392 buyers at an average of 22,231 -- but 86% of them were inside a two-hour spike that had
 // ended six hours earlier, nothing had gone at or above 20,000 since, and buyers were paying 13,486.
 //

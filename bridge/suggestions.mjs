@@ -422,7 +422,7 @@ export function focusAllows(focus, limit) {
  * mechanic that sits outside the price data. Never bought by any tier.
  *
  * 13190, Old school bond. A bond bought on the Grand Exchange arrives UNTRADEABLE, and the fee to
- * make it tradeable again all but always exceeds the spread -- novi, 28 Sept 2026. So the margin is
+ * make it tradeable again all but always exceeds the spread -- the maintainer, 28 Sept 2026. So the margin is
  * not one a player can realise, however wide it looks and however much archived history supports it.
  *
  * This is not a fringe case for the market tier, it is one of its favourite picks. A bond is
@@ -433,7 +433,7 @@ export function focusAllows(focus, limit) {
  * tax.mjs), so marginClearsTax -- the check that catches thin edges -- exempts it by construction and
  * every margin safety net waves it through.
  *
- * The one case novi named where a bond is worth buying is a Jagex announcement of a membership price
+ * The one case named where a bond is worth buying is a Jagex announcement of a membership price
  * rise, which lifts the bond with it. That is a news event rather than a spread, so it belongs with
  * the news-to-item causal chains, not in the ordinary margin ranking.
  *
@@ -473,7 +473,7 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
   const blocklist = options.blocklist instanceof Set ? options.blocklist : new Set();
   // >= 0, not > 0: an EMPTY coin pouch is a real answer, not a missing one. The plugin sends no
   // cash parameter at all when it has not read the inventory yet (cashStack -1), so absent already
-  // means unknown -- and treating a genuine 0 as unknown removed the cap entirely. Found by novi on
+  // means unknown -- and treating a genuine 0 as unknown removed the cap entirely. Found by a player on
   // 29 Sept 2026 after banking their coins: EVI offered four 3rd age robe tops at 131,812,123 each,
   // over half a billion gp, to a player carrying nothing. At cash=1000 it correctly sized down to a
   // 200 gp trade, which is what made the falsy-zero obvious.
@@ -657,9 +657,9 @@ export function pickPersistentOpenPosition(openPositions, account, blocklist, is
   //
   // Returning the oldest and letting the caller silence it starved every position behind it. A
   // position already listed is being sold, so the caller correctly declines to remind about it --
-  // but it then stopped, and nothing newer was ever reached. Found on novi's own bridge, 29 Sept
-  // 2026: a Cannon base listed since 00:02 sat at the head of the queue all day, hiding Granite
-  // boots, a Dagon'hai hat and 103 Black d'hide shields behind it, and the queue only advances when
+  // but it then stopped, and nothing newer was ever reached. Found on a live bridge, 29 Sept
+  // 2026: a Cannon base listed since 00:02 sat at the head of the queue all day, hiding three
+  // newer positions behind it, and the queue only advances when
   // a position CLOSES, never when it is merely selling. The trigger is ordinary -- take a
   // suggestion, collect a partial fill, take another -- so this reaches every user, not just a
   // large trader.
@@ -744,7 +744,7 @@ export function computeHoldingSuggestion(latestPrices, holdItemId, holdQty, hold
 //
 // The journal is NOT that source, and the difference is not small. It keeps an offer's state until the
 // bridge SEES it end, so anything cancelled or collected while the bridge was down stays SELLING for
-// ever. Measured on novi's journal, 28 Sept 2026: **64 offers still marked open, of which the plugin
+// ever. Measured on one player's journal, 28 Sept 2026: **64 offers still marked open, of which the plugin
 // was reporting 8** -- the GE's entire capacity -- with 33 SELLING records covering 29 distinct items
 // whose last refresh was over a day earlier, the oldest 343 hours. Reading those as "already listed"
 // silences the holding reminder for 29 items the player is not selling, which is the opposite of the
@@ -907,7 +907,7 @@ export function computeInventorySuggestion(latestPrices, inventory, mapping, opt
   // How many of each item the player keeps FOR USE, when they have said so with a quantity.
   // Marking an item personal-use used to hide every unit of it for ever -- the one being worn and
   // any duplicate that dropped -- because "I own one of these for use" and "I never sell this item"
-  // were the same statement. novi, 29 Sept: "if I get an ancestral robe top for example as a drop,
+  // were the same statement. The maintainer, 29 Sept: "if I get an ancestral robe top for example as a drop,
   // it will probably still not suggest to sell that one." It bites hardest for a player who marks
   // their whip, is later given one as a drop, carries it, and is never told it is worth 2m.
   const keptForUse = options.keptForUse instanceof Map ? options.keptForUse
@@ -957,8 +957,8 @@ export function computeInventorySuggestion(latestPrices, inventory, mapping, opt
  * can do both. Ranking the two by value therefore compares nothing: whichever "loses" does not stop
  * being worth doing. Until 30 September 2026 it did compare them, and the bridge's own words for it
  * were "Your own Gilded d'hide vambraces is worth about 209,700 gp ... against 1,114,253 gp for this
- * market-wide pick, so EVI set your history aside this time." novi was holding 1 Gilded d'hide
- * vambraces, had four free slots, and could not get EVI to mention them even at "No minimum at all"
+ * market-wide pick, so EVI set your history aside this time." The player was holding one Gilded
+ * d'hide vambraces, had free slots, and could not get EVI to mention it even at "No minimum at all"
  * -- which bypasses the OTHER gate on holdings (holdingPreempts) and lands squarely on this one.
  *
  * Whether a holding should pre-empt a new trade at all is a separate question with its own answer
@@ -1079,7 +1079,7 @@ export function orderSizeCap(liquidity, targetDurationMinutes, options = {}) {
 export function volumeShareForDuration(targetDurationMinutes) {
   if (!Number.isFinite(targetDurationMinutes) || targetDurationMinutes <= 0) return DEFAULT_MAX_VOLUME_SHARE;
   // Reaches the ceiling at twelve hours instead of two days, and stops there. Changed 28 Sept 2026
-  // on two measurements that agree, after novi's head-to-head: with 100m in hand Copilot offered 24
+  // on two measurements that agree, after a head-to-head run by one player: at a 100m stack Copilot offered 24
   // Echo virtus ornament kits, an item trading about 4 an hour, where EVI would allow 2.
   //
   // The old ladder was hours/24, a constant 1/24th of the volume that will trade in the window, and
@@ -1225,7 +1225,7 @@ export const MIN_ROBUST_HOURS = 6;
  * Found live on 29 Sept 2026: EVI offered 2,000 Divine super defence potion(4) at **299** to sell at
  * 5,177, a headline of nearly 10m gp. The item normally trades around 5,000-5,500, and its own hour
  * had an average sell of **2,984 across 1,898 real trades** -- the 299 was a single print, a tenth of
- * what everyone else in that same hour got. novi's read on the cause is the likely one: a player
+ * what everyone else in that same hour got. The maintainer's read on the cause is the likely one: a player
  * emptying leftovers after training Herblore floods the low side, which explains the volume spike and
  * the crashed print together.
  *
@@ -1262,7 +1262,7 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
   const blocklist = options.blocklist instanceof Set ? options.blocklist : new Set();
   // >= 0, not > 0: an EMPTY coin pouch is a real answer, not a missing one. The plugin sends no
   // cash parameter at all when it has not read the inventory yet (cashStack -1), so absent already
-  // means unknown -- and treating a genuine 0 as unknown removed the cap entirely. Found by novi on
+  // means unknown -- and treating a genuine 0 as unknown removed the cap entirely. Found by a player on
   // 29 Sept 2026 after banking their coins: EVI offered four 3rd age robe tops at 131,812,123 each,
   // over half a billion gp, to a player carrying nothing. At cash=1000 it correctly sized down to a
   // 200 gp trade, which is what made the falsy-zero obvious.
@@ -1491,7 +1491,7 @@ export function computePushedSuggestion(candidates, options = {}) {
   const blocklist = options.blocklist instanceof Set ? options.blocklist : new Set();
   // >= 0, not > 0: an EMPTY coin pouch is a real answer, not a missing one. The plugin sends no
   // cash parameter at all when it has not read the inventory yet (cashStack -1), so absent already
-  // means unknown -- and treating a genuine 0 as unknown removed the cap entirely. Found by novi on
+  // means unknown -- and treating a genuine 0 as unknown removed the cap entirely. Found by a player on
   // 29 Sept 2026 after banking their coins: EVI offered four 3rd age robe tops at 131,812,123 each,
   // over half a billion gp, to a player carrying nothing. At cash=1000 it correctly sized down to a
   // 200 gp trade, which is what made the falsy-zero obvious.
@@ -1749,7 +1749,8 @@ export const MARGIN_CUSHION_MULTIPLIER = 1;
 //     the 71% a flat percentage-of-stack would have. The blood runes sit at 0.33x.
 //   * below 1x tax it is offered with a warning (see server.mjs). Requiring 1x outright was measured
 //     and rejected as too strict: it would have dropped 27% of candidates, and among them real trades
-//     of novi's own -- the Eclipse Moon chestplate flip sits at 0.83x and made 1.78m on 1.65m.
+//     from the same journal -- an Eclipse Moon chestplate flip sits at 0.83x and still cleared a
+//     real profit after tax.
 //
 // Dropping the clear losers and warning on the merely thin is the standing warn-don't-block rule here.
 //

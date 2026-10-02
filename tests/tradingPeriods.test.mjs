@@ -2,7 +2,9 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {tradingPeriods, ENOUGH_CLOSED} from '../bridge/tradingPeriods.mjs';
 
-const ACCOUNT = '726aae7714282f0046bdaaf5070af705cb1bbb4fdfbd352f08e26bb2aa86fb3d';
+// A synthetic hash of the right shape. The plugin sends a 64-hex account identifier and this test
+// only needs a stable one -- a real identifier is what a journal is indexed by, so it never ships.
+const ACCOUNT = 'a'.repeat(64);
 const T = Date.UTC(2026, 8, 19, 12);
 const row = (min, mins, over, extra = {}) => ({account: ACCOUNT, ts: T + over * 60000, minProfit: min,
   durationMinutes: mins, risk: 'medium', taken: false, ...extra});

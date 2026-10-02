@@ -211,7 +211,7 @@ test('the pushed tier sizes from the item\'s buy limit, not from the browser\'s 
 });
 
 test('a pushed pick that IS cut by the volume cap still renders its note', async () => {
-  // This exact path threw "pushedShare is not defined" on novi's live bridge on 28 Sept 2026: the
+  // This exact path threw "pushedShare is not defined" on a live bridge on 28 Sept 2026: the
   // sizing rewrite removed the variable and left one reference behind in the notes, so every
   // market-block request 502'd and the plugin showed "Bridge unreachable". Nothing caught it because
   // no test had ever produced a share-limited PUSHED pick and then read the sentence. The note is the

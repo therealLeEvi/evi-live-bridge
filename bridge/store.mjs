@@ -251,7 +251,7 @@ export class Store {
     // tool writes "copilot|item|times|..." and the CSV import writes 'generic:["csv <file>",...]', so
     // the same trade arriving by the other door has a fingerprint that can never match and would be
     // accepted as new -- double-weighting that item in every ranking afterwards, with nothing said.
-    // Found on 27 Sept while checking whether novi's own flips.csv overlapped their earlier import: it
+    // Found on 27 Sept while checking whether a real flips.csv overlapped an earlier import: it
     // did not (that one stops at 12 Sept and the file starts on the 18th), so the collision was luck
     // rather than design. The content key closes it: an item, an account, a quantity, a profit and both
     // timestamps. Two genuinely separate flips of one item cannot share a start AND an end time on one

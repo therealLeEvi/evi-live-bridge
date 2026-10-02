@@ -87,6 +87,66 @@ export function volumeReadingFor(volumes, itemId) {
   return Math.min(v.highPriceVolume || 0, v.lowPriceVolume || 0);
 }
 
+/**
+ * The hourly volume an ORDER SIZE should be built on: a typical hour, not the latest one.
+ *
+ * WHY THIS EXISTS. `volumeShareForDuration` multiplies ONE hour's volume, and that hour was whatever
+ * the Wiki's /1h endpoint last reported. On 2 Oct 2026 it sized a buy of Harmony island teleports
+ * (item 19625) off an hour in which about 969 units traded, on an item whose typical hour over the
+ * following day was 92 and whose hours ranged from 1 to 809. The order it allowed was close to half
+ * the item's entire daily volume, which no order can clear.
+ *
+ * MEASURED before building (tools/volume-basis.mjs, 388,669 item-hours over 14 days). Sizing off the
+ * latest hour against sizing off a trailing median, counting orders that needed more than a quarter
+ * of EVERY unit the market traded in the window:
+ *
+ *   latest hour      8.4% needed >25% of all volume   median order 475
+ *   median of 24h    2.3%                             median order 411
+ *   median of 168h   1.1%                             median order 403
+ *   median of 336h   1.1%                             median order 409
+ *
+ * So a week's median cuts oversized orders about SEVENFOLD for roughly 20% off the typical order,
+ * and it plateaus between one and two weeks -- the same shape the price window showed on 29 Sept.
+ * It holds at the Slow pace too (2.2% -> 0.2%). The counts are a FLOOR on how often the basis
+ * oversizes, not a fill rate: forward volume is a ceiling, since nobody captures every unit traded.
+ *
+ * IT DOES NOT ONLY SHRINK ORDERS, and that needed checking separately before shipping. Against the
+ * live catalogue it GROWS the order on 692 of 1,169 offerable items, because an item having a quiet
+ * hour was being under-sized just as a spiking one was being over-sized. Split by direction, grown
+ * orders are 1.5% against shrunk orders' 0.8% on the >25% measure (0.3% against 0.1% impossible),
+ * both far under the latest hour's 8.3% -- so growth is not buying the improvement with new risk.
+ * Verified against live prices at 1m, 5m, 50m, 205m and 380m: nothing goes quiet, and deployed
+ * capital is flat or slightly higher at every stack. The basis is more ACCURATE, not more timid.
+ *
+ * EVI already learned this for PRICES -- ROBUST_PRICE_HOURS is 336 because one recent print is not
+ * the market -- and had never applied it to volume.
+ *
+ * WHAT IT DOES TO THE CASE ITEM. Harmony island teleport (tablet), item 19625, over 165 archived
+ * hours: its typical hour is 10 units on the thinner side, its latest hour was 17, and the spike hour
+ * the cap had been reading was 969 (per-hour minimum p10 0, p50 6, p90 98, max 809). So an order the
+ * old basis allowed in the hundreds is sized at 10. That is a large cut and it is the right one: an
+ * item trading ten units an hour cannot absorb a large position, and pretending otherwise is what
+ * leaves stock unsold. Capital belongs in items whose typical hour can take it.
+ *
+ * A ZERO TYPICAL READING FALLS BACK rather than constraining to one unit, which is the one place this
+ * departs from the measured-zero rule volumeReadingFor and orderSizeCap follow. The rules are about
+ * different measurements. "Nobody bought this in the last hour" is a statement about NOW and a real
+ * warning sign. "The median hour of the last week has a zero on one side" is a statement about
+ * typicality, on an item the live floor has already established is trading both ways right now.
+ * Measured against the price archive: of 1,238 items offerable on the latest hour, 1.9% have a zero
+ * typical reading, and constraining those to a single unit would be a behaviour change with no
+ * measurement behind it. Falling back sizes them exactly as today -- strictly no regression, which is
+ * the promise this helper has to keep.
+ *
+ * Falls back to the latest hour whenever no usable typical reading exists, which is exactly the old
+ * behaviour: a missing median must never make sizing stricter by accident.
+ */
+export function sizingLiquidityFor(options, itemId) {
+  const typical = options?.typicalVolumes?.[String(itemId)];
+  if (Number.isFinite(typical) && typical > 0) return typical;
+  return volumeReadingFor(options?.volumes, itemId);
+}
+
 // Does a buy suggestion's margin survive at the price buyers have ACTUALLY been paying?
 //
 // The sell price EVI quotes is /latest's "high": a single print, the most recent instant-buy. On a
@@ -452,7 +512,7 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
     // volume data, constrain nothing". That is how an Eclipse Moon chestplate (broken) that no one had
     // bought at the high side for four full hours was suggested at quantity 3, with a sell target
     // resting on a single two-unit print; the player followed it and lost the tax. See volumeReadingFor.
-    const ownLiquidity = volumeReadingFor(options.volumes, h.itemId);
+    const ownLiquidity = sizingLiquidityFor(options, h.itemId);
     const personalVolumeShare = Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : volumeShareForDuration(targetDurationMinutes);
     if (ownLiquidity !== null) {
       const withinVolume = orderSizeCap(ownLiquidity, targetDurationMinutes, options);
@@ -492,7 +552,7 @@ export function computeSuggestion(flips, latestPrices, now = Date.now(), options
   const notes = [];
   if (cashLimited) notes.push('reduced from your usual size to what your current cash stack can afford');
   if (stackLimited) notes.push(`reduced so this one trade commits at most `+Math.round(options.maxStackShare*100)+`% of your cash stack`);
-  if (shareLimited) notes.push(`reduced to `+Math.round(personalShareUsed*100)+`% of this item's recent hourly trading, so the order isn't larger than the market absorbs`);
+  if (shareLimited) notes.push(`reduced to `+Math.round(personalShareUsed*100)+`% of what this item trades in a typical hour, so the order isn't larger than the market absorbs`);
   if (durationLimited) notes.push(`reduced to fit an estimated ~${targetDurationMinutes}-minute trade`);
   if (limitLimited) notes.push('reduced to what EVI has seen left of this item\'s GE buy limit, which is all that can fill before the limit resets in 4 hours -- a bigger offer would sit part-filled until then');
   if (ageMinutes !== null && ageMinutes > MAX_PRICE_AGE_MINUTES)
@@ -1209,6 +1269,9 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     if (!p || !(p.low > 0) || !(p.high > 0)) continue;
     const v = volumes?.[String(item.id)];
     const liquidity = Math.min(v?.highPriceVolume || 0, v?.lowPriceVolume || 0);
+    // The floor above ("does this item trade at all") stays on the LATEST hour, because that is a
+    // question about now. Only the SIZE moves to a typical hour -- see sizingLiquidityFor.
+    const sizingLiquidity = sizingLiquidityFor(options, item.id) ?? liquidity;
     // options.minHourlyVolume raises the liquidity floor above the conservative default, for callers
     // who would rather only see items that clearly trade all day.
     //
@@ -1311,10 +1374,10 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
     // window volume on such items. Off unless the caller sets it, so nothing changes by default.
     if (Number.isFinite(options.volumeWindowShare) && options.volumeWindowShare > 0) {
       const windowHours = targetDurationMinutes !== undefined ? targetDurationMinutes / 60 : 1;
-      const affordableByWindow = Math.max(1, Math.floor(liquidity * windowHours * options.volumeWindowShare));
+      const affordableByWindow = Math.max(1, Math.floor(sizingLiquidity * windowHours * options.volumeWindowShare));
       if (affordableByWindow < quantity) { quantity = affordableByWindow; shareLimited = true; }
     } else if (volumeShare > 0) {
-      const affordableByVolume = Math.max(1, Math.floor(liquidity * volumeShare));
+      const affordableByVolume = Math.max(1, Math.floor(sizingLiquidity * volumeShare));
       if (affordableByVolume < quantity) { quantity = affordableByVolume; shareLimited = true; }
     }
     const gated = gateCandidate(item.id, quantity, options);
@@ -1382,7 +1445,7 @@ export function computeMarketSuggestion(mapping, latestPrices, volumes, options 
   if (durationLimited) notes.push(`capped to fit an estimated ~${targetDurationMinutes}-minute trade`);
   if (limitLimited) notes.push('capped to what EVI has seen left of this item\'s GE buy limit, which is all that can fill before the limit resets in 4 hours -- a bigger offer would sit part-filled until then');
   if (stackLimited) notes.push(`capped so this one trade commits at most `+Math.round(options.maxStackShare*100)+`% of your cash stack`);
-  if (shareLimited) notes.push(`capped to ${Math.round(maxVolumeShare * 100)}% of this item's recent hourly trading, so the order isn't larger than the market absorbs`+(maxVolumeShare > DEFAULT_MAX_VOLUME_SHARE ? ` over your ${targetDurationMinutes >= 120 ? Math.round(targetDurationMinutes / 60) + '-hour' : targetDurationMinutes + '-minute'} trade window` : ''));
+  if (shareLimited) notes.push(`capped to ${Math.round(maxVolumeShare * 100)}% of what this item trades in a typical hour, so the order isn't larger than the market absorbs`+(maxVolumeShare > DEFAULT_MAX_VOLUME_SHARE ? ` over your ${targetDurationMinutes >= 120 ? Math.round(targetDurationMinutes / 60) + '-hour' : targetDurationMinutes + '-minute'} trade window` : ''));
   return {
     itemId: item.id,
     name: item.name,
@@ -1481,7 +1544,7 @@ export function computePushedSuggestion(candidates, options = {}) {
     // mode behind every large loss the 90-day backtest found. A measured zero constrains to a single
     // unit; genuinely absent volume data constrains nothing, exactly as in the other tiers.
     let shareLimited = false;
-    const pushedLiquidity = volumeReadingFor(options.volumes, c.itemId);
+    const pushedLiquidity = sizingLiquidityFor(options, c.itemId);
     if (pushedLiquidity !== null) {
       const withinVolume = orderSizeCap(pushedLiquidity, options.targetDurationMinutes, options);
       if (withinVolume !== null && withinVolume < quantity) { quantity = withinVolume; shareLimited = true; }
@@ -1507,7 +1570,7 @@ export function computePushedSuggestion(candidates, options = {}) {
     // wrong one would misdescribe the order (see orderSizeCap).
     if (shareLimited) notes.push(Number.isFinite(options.volumeWindowShare) && options.volumeWindowShare > 0
       ? `reduced to ${Math.round(options.volumeWindowShare * 100)}% of what this item trades over your whole trade window`
-      : `reduced to ${Math.round((Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : volumeShareForDuration(options.targetDurationMinutes)) * 100)}% of this item's recent hourly trading`);
+      : `reduced to ${Math.round((Number.isFinite(options.maxVolumeShare) ? options.maxVolumeShare : volumeShareForDuration(options.targetDurationMinutes)) * 100)}% of what this item trades in a typical hour`);
     return {
       itemId: c.itemId,
       name,

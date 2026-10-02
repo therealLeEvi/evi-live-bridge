@@ -1067,11 +1067,11 @@ test('market: no maxStackShare leaves sizing exactly as before', () => {
   assert.doesNotMatch(uncapped.reasoning, /of your cash stack/);
 });
 
-test('market: maxVolumeShare caps a trade to a share of recent hourly trading', () => {
+test('market: maxVolumeShare caps a trade to a share of a typical hour of trading', () => {
   // 500/hour on the thin side, 5% = 25 units.
   const s = computeMarketSuggestion(mapping(), fresh(), volumes(), {maxVolumeShare: 0.05, blocklist: new Set([2])});
   assert.equal(s.quantity, 25);
-  assert.match(s.reasoning, /5% of this item's recent hourly trading/);
+  assert.match(s.reasoning, /5% of what this item trades in a typical hour/);
 });
 
 // -- taxFreeOnly / the Starter profile: market-wide picks restricted to items the GE charges no tax
@@ -1101,7 +1101,7 @@ test('market: the default volume-share cap is applied unless a caller opts out',
   // volumes() is 500/hour, so the 10% default allows 50 units of Rune nails' 10,000 limit.
   const capped = computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2])});
   assert.equal(capped.quantity, 50);
-  assert.match(capped.reasoning, /10% of this item's recent hourly trading/);
+  assert.match(capped.reasoning, /10% of what this item trades in a typical hour/);
   assert.equal(computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2]), maxVolumeShare: 0}).quantity, 10000);
 });
 
@@ -1151,8 +1151,8 @@ test('sizing: a twelve-hour trade may be ten times the order a one-hour trade ma
   const long = computeMarketSuggestion(mapping(), fresh(), volumes(), {blocklist: new Set([2]), targetDurationMinutes: 12 * 60});
   assert.equal(short.quantity, 50);
   assert.equal(long.quantity, 500);
-  assert.match(long.reasoning, /100% of this item's recent hourly trading[^.]*over your 12-hour trade window/);
-  assert.match(short.reasoning, /10% of this item's recent hourly trading/);
+  assert.match(long.reasoning, /100% of what this item trades in a typical hour[^.]*over your 12-hour trade window/);
+  assert.match(short.reasoning, /10% of what this item trades in a typical hour/);
   assert.doesNotMatch(short.reasoning, /trade window/, 'the unchanged 10% cap says nothing new');
   // The player's own history is sized the same way.
   const vols = volumes({'1': {highPriceVolume: 300, lowPriceVolume: 300}});
@@ -1181,7 +1181,7 @@ test('personal history: the volume-share cap applies here too, so a proven item 
   const vols = volumes({'1': {highPriceVolume: 300, lowPriceVolume: 300}}); // 10% of 300 = 30
   const s = computeSuggestion(flips, fresh(), Date.now(), {volumes: vols});
   assert.equal(s.quantity, 30);
-  assert.match(s.reasoning, /10% of this item's recent hourly trading/);
+  assert.match(s.reasoning, /10% of what this item trades in a typical hour/);
   // Opting out restores the old sizing, and no volume data at all never constrains anything.
   assert.equal(computeSuggestion(flips, fresh(), Date.now(), {volumes: vols, maxVolumeShare: 0}).quantity, 150);
   assert.equal(computeSuggestion(flips, fresh(), Date.now(), {}).quantity, 150);

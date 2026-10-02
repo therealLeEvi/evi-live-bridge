@@ -15,7 +15,7 @@ import {joinSuggestionOutcomes,summarizeOutcomes} from './suggestionOutcomes.mjs
 import {tradingPeriods} from './tradingPeriods.mjs';
 import {createPriceArchive,readArchive} from './priceArchive.mjs';
 import {createNewsChains} from './newsChains.mjs';
-import {createCorrelationIndex,correlationNote,CORRELATED_THRESHOLD} from './correlation.mjs';
+import {createCorrelationIndex,correlationNote,aggregateToStep,CORRELATED_THRESHOLD} from './correlation.mjs';
 import {buildFillModel,fillChance,fillChanceSentence} from './fillModel.mjs';
 import {relistAdvice} from './relist.mjs';
 import {holdingsAdvice} from './holdingsAdvice.mjs';
@@ -200,11 +200,11 @@ export function suggestionPolicy(searchParams) {
   };
 }
 
-export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
+export function createBridge({dir=path.join(root,'data'),port=51743,fetchText=null}={}) {
   fs.mkdirSync(dir,{recursive:true});
   const secretsFile=path.join(dir,'keys.json');
   if(!fs.existsSync(secretsFile))fs.writeFileSync(secretsFile,JSON.stringify({scanner:randomBytes(32).toString('hex'),plugin:randomBytes(32).toString('hex')},null,2),{mode:0o600,flag:'wx'});
-  const secrets=JSON.parse(fs.readFileSync(secretsFile,'utf8')),store=new Store(dir),cache=new Map(),suggestionPrices=createMarketCache();
+  const secrets=JSON.parse(fs.readFileSync(secretsFile,'utf8')),store=new Store(dir),cache=new Map(),suggestionPrices=createMarketCache({fetchText});
   // Scoring data for future accuracy checks (see suggestionLog.mjs), and the optional, off-by-default
   // hourly Wiki price archive (see priceArchive.mjs). The archive only runs once start() is called,
   // which the standalone entry point below does; tests never start it.
@@ -246,7 +246,11 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
   function correlationIndex(now=Date.now()) {
     if(correlationCache.index && now-correlationCache.at<3600000)return correlationCache.index;
     try {
-      const buckets=readArchive(dir,Math.floor(now/1000)-90*86400,Infinity,'1h').filter((_,i)=>i%6===0);
+      // AGGREGATED into six-hour blocks, not sampled every 6th hour. Sampling kept the single-hour
+      // bid-ask bounce that six-hourly exists to average away, so a genuine equipment family read
+      // 0.198 against a 0.5 threshold and this check had never once fired in practice. See
+      // aggregateToStep in correlation.mjs for the measurement.
+      const buckets=aggregateToStep(readArchive(dir,Math.floor(now/1000)-90*86400,Infinity,'1h'));
       correlationCache={at:now,index:buckets.length>60?createCorrelationIndex(buckets):null};
     } catch { correlationCache={at:now,index:null}; }
     return correlationCache.index;
@@ -409,6 +413,63 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
     robustCache={at:empty?now-270000:now,prices:prices||{}};
     return robustCache.prices;
   }
+  // A TYPICAL hour's volume per item, for sizing an order -- never the latest hour.
+  //
+  // `volumeShareForDuration` multiplies one hour, and that hour is whatever the Wiki's /1h endpoint
+  // last reported. On 2 Oct 2026 it sized a buy off an hour in which ~969 units traded, on an item
+  // whose typical hour was 92 and whose hours ran from 1 to 809. Measured over 388,669
+  // item-hours (tools/volume-basis.mjs): sizing off the latest hour puts 8.4% of orders above a
+  // quarter of everything the market trades in the window; off a week's median, 1.1% -- a sevenfold
+  // cut for about 20% off the typical order, plateauing between one and two weeks.
+  //
+  // The same lesson ROBUST_PRICE_HOURS already encodes for prices, which is why this reuses its
+  // shape: one archive pass, cached, warmed off the request path.
+  //
+  // A MEDIAN, not a mean: a mean is dragged by exactly the spike this exists to ignore.
+  const TYPICAL_VOLUME_HOURS=168;
+  let typicalVolumeCache=null;
+  function typicalVolumesCached() {
+    const now=Date.now();
+    if(typicalVolumeCache&&now-typicalVolumeCache.at<900000)return typicalVolumeCache.volumes;
+    // Each side is collected SEPARATELY and the medians are combined at the end, rather than taking
+    // the median of each hour's thinner side. Both answer "the thinner side of a typical hour", but
+    // the per-hour minimum is harsher than either side really is: on a thin item the quiet side
+    // alternates, so most hours have a zero on one side or the other and the median of those minima
+    // collapses to zero even though both sides trade perfectly well across a week. Measured against
+    // the archive over 1,238 offerable items: median-of-per-hour-minimum reads zero on 3.4% of
+    // them, min-of-per-side-medians on 1.9%, and the live reading this replaces is itself a min of
+    // two sides within one hour -- so combining at the end is the closer analogue as well as the
+    // less lossy one. On the case item it is the difference between 6 units and 10.
+    const high=new Map(), low=new Map();
+    try {
+      for(const b of readArchive(dir,Math.floor(now/1000)-TYPICAL_VOLUME_HOURS*3600,Infinity,'1h'))
+        for(const [id,r] of Object.entries(b.d||{})) {
+          if(!r)continue;
+          if(!high.has(id)){high.set(id,[]);low.set(id,[]);}
+          high.get(id).push(r[1]||0);
+          low.get(id).push(r[3]||0);
+        }
+    } catch { /* no archive: every item falls back to the live hour, which is the old behaviour */ }
+    const med=list=>{list.sort((a,b)=>a-b);return list[Math.floor(list.length/2)];};
+    const out={};
+    for(const [id,hl] of high) {
+      // Too few hours to call anything typical -- fall back rather than invent one.
+      if(hl.length<24)continue;
+      // An order is limited by the thinner side of the book, so sizing must be too.
+      const v=Math.min(med(hl),med(low.get(id)));
+      // A zero is not published at all: sizingLiquidityFor falls back to the live hour for it, which
+      // is today's behaviour, and its doc comment carries the reasoning. Emitting the zero would read
+      // as a measured zero and size the item at one unit.
+      if(v>0)out[id]=v;
+    }
+    const empty=!Object.keys(out).length;
+    // An empty build is retried soon, for the reason robustPricesCached gives: falling back for a
+    // full window would quietly restore the behaviour this replaces.
+    typicalVolumeCache={at:empty?now-870000:now,volumes:out};
+    return typicalVolumeCache.volumes;
+  }
+  setTimeout(()=>{try{typicalVolumesCached();}catch{}},1500).unref?.();
+
   // Warmed off the request path shortly after startup, because the FIRST poll after a restart must
   // not pay for a two-week median. The plugin's readTimeout is 2000ms and a timeout there is not
   // reported as slowness -- the sidebar says "Bridge unreachable, check it's running and the pairing
@@ -670,7 +731,12 @@ export function createBridge({dir=path.join(root,'data'),port=51743}={}) {
           const maxStackShare=Number.isFinite(stackShareParam)&&stackShareParam>0&&stackShareParam<=100?stackShareParam/100:undefined;
           // Starter profile (EviLiveConfig.tradingProfile): market-wide picks restricted to items the
           // GE charges no tax on. See TradingProfile.java for the backtest behind it.
-          const {taxFreeOnly,requireCushion,sizing,marketRankBy}=suggestionPolicy(url.searchParams);
+          const {taxFreeOnly,requireCushion,sizing:sizingPolicy,marketRankBy}=suggestionPolicy(url.searchParams);
+          // `sizing` is spread into every tier and is documented as "how much of a market an order
+          // can be, which is the same physics whichever tier picked the item" -- so the typical-hour
+          // reading belongs here rather than being threaded through six call sites. See
+          // sizingLiquidityFor in suggestions.mjs for the measurement behind it.
+          const sizing={...sizingPolicy,typicalVolumes:typicalVolumesCached()};
           async function cushionForSuggestion(candidate) {
             try {
               const url2=`https://prices.runescape.wiki/api/v1/osrs/timeseries?id=${candidate.itemId}&timestep=5m`;

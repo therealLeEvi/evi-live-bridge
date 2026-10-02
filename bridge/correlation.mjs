@@ -30,6 +30,59 @@
 // together at all; rune EQUIPMENT does. A name-based family check would have blocked the wrong
 // trades and missed the right ones.
 export const CORRELATION_STEP_SECONDS = 6 * 3600;
+
+// HOW THE SIX-HOUR SERIES IS BUILT, and why it is aggregated rather than sampled.
+//
+// FOUND 2 OCT 2026: this check had never once fired in practice, because the server built
+// its six-hour series by taking every 6th HOURLY bucket. That is sampling, not aggregating, and it
+// keeps the full single-hour bid-ask bounce -- the exact noise the measurement above chose six hours
+// to average away. It simply uses a sixth as many observations of the same noisy quantity.
+//
+// Measured both ways over the same 90 days:
+//
+//   pair                              sampled every 6th hour   aggregated into 6h blocks
+//   Rune platebody / Rune scimitar                     0.198                       0.627
+//   Rune platelegs / Rune platebody                    0.136                       0.592
+//   Fire rune / Air rune                               0.205                       0.327
+//   Nature rune / Death rune                           0.029                      -0.035
+//   Rune platebody / Nature rune                      -0.072                      -0.136
+//
+// So a genuine equipment family read 0.198 against a 0.5 threshold and could never clear it, while
+// the only pairs that DID clear it under sampling were low-overlap noise (Turquoise robe top / Iron
+// javelin at 0.702 on an overlap of 78). The calibration was right and the wiring nullified it.
+//
+// Aggregated, the numbers match what the comment above records (0.627 here against 0.730 then --
+// a different 90-day window, not a different method), and the finding that justified rejecting a
+// name-based family check SURVIVES: runes still do not move together, rune equipment does.
+export function aggregateToStep(buckets, stepSeconds = CORRELATION_STEP_SECONDS) {
+  const blocks = new Map();
+  for (const b of buckets || []) {
+    if (!b || !Number.isFinite(b.ts)) continue;
+    const blk = Math.floor(b.ts / stepSeconds);
+    if (!blocks.has(blk)) blocks.set(blk, new Map());
+    const into = blocks.get(blk);
+    for (const [id, r] of Object.entries(b.d || {})) {
+      if (!r) continue;
+      if (!into.has(id)) into.set(id, {hi: [], lo: []});
+      const t = into.get(id);
+      if (Number.isFinite(r[0]) && r[0] > 0) t.hi.push(r[0]);
+      if (Number.isFinite(r[2]) && r[2] > 0) t.lo.push(r[2]);
+    }
+  }
+  const mean = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+  // Each side is averaged over the hours in the block, then the block is emitted at its own start
+  // timestamp so consecutive blocks are exactly stepSeconds apart and returnsFor's spacing check --
+  // which is what silently rejected everything before -- holds by construction.
+  return [...blocks.keys()].sort((a, b) => a - b).map(blk => {
+    const d = {};
+    for (const [id, t] of blocks.get(blk)) {
+      const hi = mean(t.hi), lo = mean(t.lo);
+      if (hi === null && lo === null) continue;
+      d[id] = [hi ?? lo, 0, lo ?? hi, 0];
+    }
+    return {ts: blk * stepSeconds, d};
+  });
+}
 // Chosen from the null distribution above: 0.03% of unrelated pairs reach it, so it effectively
 // never fires by accident, while a genuine equipment family clears it comfortably.
 export const CORRELATED_THRESHOLD = 0.5;

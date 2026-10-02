@@ -99,3 +99,48 @@ test('missing prices, missing timing or a zero price produce nothing at all',()=
   assert.equal(relistAdvice({offers:[],prices:prices(),costBasis:cost(),now:NOW}).length,0);
   assert.equal(relistAdvice({offers:null,prices:prices(),now:NOW}).length,0);
 });
+
+test('a market under break-even speaks however wide the gap, overlapping the plugin on purpose', () => {
+  // FROM A LIVE CASE, 2 Oct 2026, reproduced here with round figures. A standing ask sat about 32%
+  // above a market that had slipped just under the holder's own break-even. The early path was
+  // suppressed by PLUGIN_SPEAKS_ABOVE, so the ONLY thing speaking was the plugin's offerDriftHint --
+  // which knows nothing about cost basis and ends "Relist nearer the market, or take the current
+  // price". Taking the current price would have locked in a loss.
+  //
+  // The hole was widest exactly when it was most expensive: the bigger the gap, the likelier the
+  // market has fallen through the cost basis.
+  //
+  // Cost basis 4,000 -> break-even 4,081 after tax; the market sits at 4,065, just below it.
+  const offer = {itemId: 19625, name: 'Harmony island teleport', price: 6000, remaining: 500,
+    firstSeen: Date.now() - 30 * 60000};
+  const prices = {'19625': {sellPrice: 4065}};
+  const under = relistAdvice({offers: [offer], prices, costBasis: new Map([[19625, 4000]]),
+    targetDurationMinutes: 720});
+  assert.equal(under.length, 1, 'a 32% gap under break-even must still speak');
+  assert.equal(under[0].belowBreakEven, true);
+  assert.equal(under[0].breakEven, 4081);
+  assert.equal(under[0].level, 'warn', 'the one case the player can lose GP on reads as a warning');
+  assert.match(under[0].message, /BELOW your break-even/);
+  assert.match(under[0].message, /lock in a loss/);
+  assert.equal(under[0].suggestedPrice, 4081, 'never a price under break-even');
+
+  // ABOVE break-even the hand-off is unchanged: a wide gap stays silent on the early path, because
+  // the plugin already says it and two sentences about one offer is the thing being avoided.
+  const clears = relistAdvice({offers: [offer], prices, costBasis: new Map([[19625, 2000]]),
+    targetDurationMinutes: 720});
+  assert.equal(clears.length, 0, 'a 32% gap that still clears break-even is left to the plugin');
+
+  // And the ordinary band is untouched in both directions.
+  const narrow = {...offer, price: 4140};               // 1.8% over market, inside the early band
+  assert.equal(relistAdvice({offers: [narrow], prices, costBasis: new Map([[19625, 2000]]),
+    targetDurationMinutes: 720}).length, 1, 'the early band still speaks when the gap is modest');
+
+  // No cost basis: nothing is claimed about break-even, and the wide gap stays with the plugin.
+  assert.equal(relistAdvice({offers: [offer], prices, costBasis: new Map(), targetDurationMinutes: 720}).length, 0,
+    'EVI must not invent a cost basis to justify speaking');
+
+  // Still floored by DRIFT_MIN_WAIT_MINUTES, so a freshly placed offer is not instantly second-guessed.
+  const fresh = {...offer, firstSeen: Date.now() - 60000};
+  assert.equal(relistAdvice({offers: [fresh], prices, costBasis: new Map([[19625, 4031]]),
+    targetDurationMinutes: 720}).length, 0, 'one minute old: too early to speak, below break-even or not');
+});

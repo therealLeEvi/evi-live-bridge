@@ -223,7 +223,7 @@ test('a pushed pick that IS cut by the volume cap still renders its note', async
   const perHour = computePushedSuggestion(one, {volumes: thin, targetDurationMinutes: 720, maxSpend: 10_000_000});
   assert.ok(perHour, 'a share-limited pushed pick must still be returned');
   assert.ok(perHour.quantity < 5000, 'the cap must actually have bitten');
-  assert.match(perHour.reasoning, /recent hourly trading/, 'the per-hour rule names itself: ' + perHour.reasoning);
+  assert.match(perHour.reasoning, /trades in a typical hour/, 'the per-hour rule names itself: ' + perHour.reasoning);
 
   // And the window-relative rule describes itself differently, because it is a different quantity in
   // different units -- quoting the per-hour wording there would misdescribe the order.

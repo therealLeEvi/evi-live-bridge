@@ -82,11 +82,32 @@ export function relistAdvice({offers, prices, costBasis = new Map(), targetDurat
     // the wrong advice (see DRIFT_SPEAKS_NOW). The second path is deliberately capped below the
     // plugin's own threshold so only one sentence appears.
     const pastTheClock = openMinutes >= waitMinutes;
-    const drifted = openMinutes >= DRIFT_MIN_WAIT_MINUTES
-      && gap >= DRIFT_SPEAKS_NOW && gap < PLUGIN_SPEAKS_ABOVE;
-    if (!pastTheClock && !drifted) continue;
     const paid = costBasis.get(offer.itemId);
     const breakEven = paid > 0 ? breakEvenSellPrice(offer.itemId, paid) : null;
+    // Hoisted above the gate below, which now needs to know it.
+    const marketUnderBreakEven = breakEven !== null && market < breakEven;
+    // THE ONE CASE WHERE TWO MESSAGES BEAT ONE, found 2 Oct 2026 from a live position.
+    //
+    // The early path is normally capped below the plugin's own threshold so a single offer never
+    // draws two sentences. But the plugin's offerDriftHint knows nothing about cost basis and ends
+    // "Relist nearer the market, or TAKE THE CURRENT PRICE" -- and when the market has fallen under
+    // what the player paid, taking the current price locks in a loss. The branch further down says
+    // exactly that and was switched off precisely when it mattered.
+    //
+    // The hole was WIDER the worse the news: the bigger the gap, the likelier the market has fallen
+    // through the cost basis, and anything past 5% handed the offer to a message that cannot mention
+    // break-even. Found live on 2 Oct 2026: a holding whose market had slipped a little under its
+    // own break-even while the standing ask sat about 32% above that market -- so the early path was
+    // suppressed, and the only thing still speaking told the player to take the current price.
+    //
+    // It was never permanent -- pastTheClock speaks regardless once a quarter of the player's pace
+    // has elapsed -- but that is 3 hours on Overnight and 12 on Slow, which is plenty of time to act
+    // on advice that costs GP. So below break-even the early path speaks whatever the gap, accepting
+    // the overlap: one of the two sentences is the only one that mentions the loss.
+    const drifted = openMinutes >= DRIFT_MIN_WAIT_MINUTES
+      && gap >= DRIFT_SPEAKS_NOW
+      && (gap < PLUGIN_SPEAKS_ABOVE || marketUnderBreakEven);
+    if (!pastTheClock && !drifted) continue;
     const hours = openMinutes / 60;
     const rounded = hours.toFixed(hours < 10 ? 1 : 0).replace(/\.0$/, ''); // "8 hours", not "8.0 hours"
     const waited = hours >= 1 ? `${rounded} hour${rounded === '1' ? '' : 's'}` : `${Math.round(openMinutes)} minutes`;
@@ -114,7 +135,7 @@ export function relistAdvice({offers, prices, costBasis = new Map(), targetDurat
     if (breakEven === null) {
       suggestedPrice = market;
       message = `${head} Relisting nearer ${market.toLocaleString('en-US')} would be likelier to sell. EVI doesn't know what you paid, so check it is still a profit.`;
-    } else if (market >= breakEven) {
+    } else if (!marketUnderBreakEven) {
       suggestedPrice = market;
       message = `${head} Relisting at market still clears your break-even of ${breakEven.toLocaleString('en-US')} after tax. Your call -- EVI never relists for you.`;
     } else {
@@ -124,10 +145,10 @@ export function relistAdvice({offers, prices, costBasis = new Map(), targetDurat
     }
     out.push({itemId: offer.itemId, name: offer.name, message, offerPrice: offer.price, marketPrice: market,
       // Below break-even is the one the player can lose GP on, so it is the one that reads as a warning.
-      level: breakEven !== null && market < breakEven ? 'warn' : 'caution',
+      level: marketUnderBreakEven ? 'warn' : 'caution',
       label: pastTheClock ? 'Not selling' : 'Market moved away',
       figures: `${offer.price.toLocaleString('en-US')} asked \u00b7 ${market.toLocaleString('en-US')} market`,
-      breakEven, suggestedPrice, openMinutes: Math.round(openMinutes), belowBreakEven: breakEven !== null && market < breakEven});
+      breakEven, suggestedPrice, openMinutes: Math.round(openMinutes), belowBreakEven: marketUnderBreakEven});
   }
   return out;
 }

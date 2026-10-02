@@ -41,6 +41,48 @@ test('sizingLiquidityFor: the typical hour wins, and its absence changes nothing
   }
   // And with no volume data at all the answer is still null, which constrains nothing anywhere.
   assert.equal(sizingLiquidityFor({}, 1), null);
+
+  // A MEASURED ZERO IN THE LATEST HOUR BEATS ANY MEDIAN. Found in review, 2 Oct 2026: the first
+  // version returned the typical hour whenever one existed, which ignored a zero latest hour and
+  // silently undid the Eclipse Moon chestplate fix wherever no liquidity floor caught it first.
+  // A median cannot tell you that you could not have exited this hour.
+  assert.equal(sizingLiquidityFor({volumes: {'1': hour(0)}, typicalVolumes: {'1': 500}}, 1), 0,
+    'nothing traded this hour: one unit, whatever the week looked like');
+  // Absent is not zero. With no latest reading at all, the typical is still better than the old
+  // behaviour, which was to constrain nothing whatsoever.
+  assert.equal(sizingLiquidityFor({typicalVolumes: {'1': 500}}, 1), 500,
+    'no latest reading: the typical hour, which is stricter than constraining nothing');
+});
+
+test('a zero latest hour holds the HISTORY and PUSHED tiers to one unit, not the weekly median', () => {
+  // THE REGRESSION THE REVIEW CAUGHT, and the reason it was invisible: the market tier drops a
+  // zero-volume item at liquidityFloorMet before sizing is ever reached, so every test above passed
+  // while these two tiers were unprotected. Both carry comments promising a measured zero constrains
+  // to a single unit -- the code had stopped doing it.
+  const dead = {'1': hour(0)}, healthy = {'1': 500};
+  const flips = [flip(), flip(2000)];
+  const common = {targetDurationMinutes: 12 * 60, maxSpend: 50_000_000};
+
+  const own = computeSuggestion(flips, fresh(), Date.now(), {...common, volumes: dead, typicalVolumes: healthy});
+  assert.ok(own, 'the item is still offered -- this is a sizing rule, not an exclusion');
+  assert.equal(own.quantity, 1, 'history tier: one unit on a dead hour, not 500 off the median');
+
+  const shortlist = [{itemId: 1, name: 'Thing', buy: 100, sell: 180, net: 60, qty: 5000, score: 50}];
+  const pushed = computePushedSuggestion(shortlist, {...common, volumes: dead, typicalVolumes: healthy});
+  assert.ok(pushed, 'the pushed pick is still offered');
+  assert.equal(pushed.quantity, 1, 'pushed tier: one unit on a dead hour');
+
+  // And the contrast, so this does not quietly become "always one unit": an hour that IS trading
+  // still gets sized off the typical hour, which is the whole point of the change.
+  const lull = computeSuggestion(flips, fresh(), Date.now(), {...common, volumes: {'1': hour(20)}, typicalVolumes: healthy});
+  const noTypical = computeSuggestion(flips, fresh(), Date.now(), {...common, volumes: {'1': hour(20)}});
+  assert.equal(noTypical.quantity, 20, 'without a typical reading the quiet hour alone sizes it');
+  assert.ok(lull.quantity > noTypical.quantity, `the typical hour must lift it: ${lull.quantity}`);
+  // It lands at 160 rather than 500 because the FILL-TIME estimate also binds, and that one reads
+  // the live hour deliberately -- correctedFillMinutes was calibrated on it, so feeding it a weekly
+  // median would apply a correction to a basis it was never measured on. Same split as the market
+  // tier; see sizingLiquidityFor.
+  assert.equal(lull.quantity, 160, 'floor(20 / 60 * 720 / 1.5) -- the fill estimate, still on the live hour');
 });
 
 test('the market tier sizes a spike hour down to the typical one', () => {

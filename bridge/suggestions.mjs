@@ -132,19 +132,35 @@ export function volumeReadingFor(volumes, itemId) {
  * departs from the measured-zero rule volumeReadingFor and orderSizeCap follow. The rules are about
  * different measurements. "Nobody bought this in the last hour" is a statement about NOW and a real
  * warning sign. "The median hour of the last week has a zero on one side" is a statement about
- * typicality, on an item the live floor has already established is trading both ways right now.
+ * typicality, on an item that is trading both ways right now.
  * Measured against the price archive: of 1,238 items offerable on the latest hour, 1.9% have a zero
  * typical reading, and constraining those to a single unit would be a behaviour change with no
- * measurement behind it. Falling back sizes them exactly as today -- strictly no regression, which is
- * the promise this helper has to keep.
+ * measurement behind it.
  *
- * Falls back to the latest hour whenever no usable typical reading exists, which is exactly the old
- * behaviour: a missing median must never make sizing stricter by accident.
+ * BUT A ZERO LATEST HOUR STILL WINS, and the first version of this got it wrong -- found in review,
+ * 2 Oct 2026. Returning the typical hour whenever one existed meant a measured zero in the LATEST
+ * hour was ignored, which silently undid the Eclipse Moon chestplate fix in the two tiers that have
+ * no liquidity floor of their own: an item nobody had bought at the high side for hours would be
+ * sized off its weekly median instead of held to a single unit. The MARKET tier was unaffected,
+ * because liquidityFloorMet drops a zero-volume item before sizing is reached -- but the HISTORY and
+ * PUSHED tiers have no such floor, and both carried comments promising exactly the behaviour this
+ * had removed. The code contradicted its own documentation in two places.
+ *
+ * So the order is: a MEASURED zero now beats any median, because a median cannot tell you that you
+ * could not have exited this hour. The typical hour only replaces a latest hour that is trading.
+ *
+ *   latest hour is a measured 0          -> 0        (one unit; the measured-zero rule, restored)
+ *   latest hour absent, typical present  -> typical  (stricter than the old "constrain nothing")
+ *   latest hour trading, typical present -> typical  (the whole point of this helper)
+ *   latest hour trading, no typical      -> latest   (exactly the old behaviour)
+ *   both absent                          -> null     (no signal; constrains nothing, as before)
  */
 export function sizingLiquidityFor(options, itemId) {
+  const latest = volumeReadingFor(options?.volumes, itemId);
+  if (latest === 0) return 0;              // nothing traded this hour: no median overrides that
   const typical = options?.typicalVolumes?.[String(itemId)];
   if (Number.isFinite(typical) && typical > 0) return typical;
-  return volumeReadingFor(options?.volumes, itemId);
+  return latest;
 }
 
 // Does a buy suggestion's margin survive at the price buyers have ACTUALLY been paying?

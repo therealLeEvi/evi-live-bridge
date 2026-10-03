@@ -197,25 +197,39 @@
     const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
     const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
-  function downloadText(text,name,type) {
-    const url=URL.createObjectURL(new Blob([text],{type}));
+  function downloadText(text,name,type,bom) {
+    // A UTF-8 BOM where asked for: Excel otherwise reads a plain .csv in a legacy code page, which
+    // mangles any item name that is not pure ASCII. Harmless to every other reader.
+    const parts=bom?['﻿',text]:[text];
+    const url=URL.createObjectURL(new Blob(parts,{type}));
     const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
+  const CRLF=String.fromCharCode(13)+String.fromCharCode(10);
   function csvCell(v) {return '"'+String(v).replace(/"/g,'""')+'"';}
   function buildTradeLogCSV() {
     if(!state)throw Error('Connect to the bridge first.');
     const header=['Match type','Account','Item','Quantity','Buy cost GP','Net proceeds GP','Profit GP','First buy','Last sell','Hold hours','Confidence','Sales combined','Note'];
     const rows=[header];
-    const addFlip=(f,type)=>rows.push([type,f.account,f.item,f.quantity,f.capital,f.netProceeds,f.profit,time(f.firstBuy),time(f.lastSell),f.hold.toFixed(2),(f.exact??true)?'Exact':'Estimated',(f.sellIds??[f.sellId]).length,'']);
+    // Eight characters, the same short form the rest of this page uses. The full value is a 64-char
+    // account identifier: it is the key every record is stored under, it repeats on every single row,
+    // and it pushed the item and the money off the first screen. Eight is still enough to tell two
+    // accounts apart, which is the only reason the column exists.
+    const shortAccount=a=>String(a==null?'':a).slice(0,8);
+    const addFlip=(f,type)=>rows.push([type,shortAccount(f.account),f.item,f.quantity,f.capital,f.netProceeds,f.profit,time(f.firstBuy),time(f.lastSell),f.hold.toFixed(2),(f.exact??true)?'Exact':'Estimated',(f.sellIds??[f.sellId]).length,'']);
     for(const f of state.flips)addFlip(f,'Manually reviewed');
     for(const f of (state.autoFlips||[]))addFlip(f,'Automatic');
     for(const f of (state.removedFlips||[]))if(!f.reopened)addFlip(f,'Removed (excluded from totals)');
-    for(const o of (state.autoOpenPositions||[]))rows.push(['Open position',o.account,o.item,o.totalQty,'','','',time(o.firstSeen),'','','','',o.partiallySold?`${o.remaining} of ${o.totalQty} still unsold`:'Not yet sold']);
-    for(const o of (state.autoUnmatchedSells||[]))rows.push(['Unmatched sale',o.account,o.name,o.unmatchedQty??o.filled,'','','',time(o.firstSeen),time(o.completedAt),'','','',o.reason||'']);
-    return rows.map(r=>r.map(csvCell).join(',')).join('\r\n');
+    for(const o of (state.autoOpenPositions||[]))rows.push(['Open position',shortAccount(o.account),o.item,o.totalQty,'','','',time(o.firstSeen),'','','','',o.partiallySold?`${o.remaining} of ${o.totalQty} still unsold`:'Not yet sold']);
+    for(const o of (state.autoUnmatchedSells||[]))rows.push(['Unmatched sale',shortAccount(o.account),o.name,o.unmatchedQty??o.filled,'','','',time(o.firstSeen),time(o.completedAt),'','','',o.reason||'']);
+    // sep=, tells Excel which delimiter to use, whatever the system list separator is. On a Dutch,
+    // German, French or Spanish Windows that separator is a SEMICOLON, so without this line every
+    // row lands in column A and the export looks broken when it is not. LibreOffice honours it too;
+    // pandas wants skiprows=1. Nothing re-imports this file, so the extra line costs no round trip.
+    // Do NOT 'fix' this by switching to semicolons: that repairs one locale and breaks every other.
+    return 'sep=,' + CRLF + rows.map(r=>r.map(csvCell).join(',')).join(CRLF) + CRLF;
   }
   $('downloadTradeLog').onclick=()=>{
-    try{downloadText(buildTradeLogCSV(),`EVI-trade-log-${new Date().toISOString().slice(0,10)}.csv`,'text/csv');}
+    try{downloadText(buildTradeLogCSV(),`EVI-trade-log-${new Date().toISOString().slice(0,10)}.csv`,'text/csv',true);}
     catch(e){$('liveAction').textContent=e.message;}
   };
   $('exportEvi').onclick=()=>download({format:'evi-browser-backup-1',data:Object.fromEntries(storageKeys.map(k=>[k,loadJSON(k,null)]))},'EVI-browser-backup.json');

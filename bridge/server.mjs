@@ -15,6 +15,8 @@ import {joinSuggestionOutcomes,summarizeOutcomes} from './suggestionOutcomes.mjs
 import {tradingPeriods} from './tradingPeriods.mjs';
 import {createPriceArchive,readArchive} from './priceArchive.mjs';
 import {createNewsChains} from './newsChains.mjs';
+import {pairingPlan,pluginKeyDir} from './pairing.mjs';
+const NL=String.fromCharCode(10);
 import {createCorrelationIndex,correlationNote,aggregateToStep,CORRELATED_THRESHOLD} from './correlation.mjs';
 import {buildFillModel,fillChance,fillChanceSentence} from './fillModel.mjs';
 import {relistAdvice} from './relist.mjs';
@@ -50,7 +52,7 @@ const MAX_PUSHED_ITEMS=50;
 // bridge ever gets noticed: the plugin updates itself through the Hub, the bridge is a zip someone
 // downloaded once. Bump this whenever a release adds something a player would want and would
 // otherwise never hear about.
-export const BRIDGE_API=4;
+export const BRIDGE_API=5;
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const same=(a,b)=>typeof a==='string'&&a.length===b.length&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
@@ -2103,6 +2105,22 @@ if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.
   app.server.on('error',e=>{console.error('Bridge could not start:',e.message);process.exitCode=1;});
   app.server.listen(51743,'127.0.0.1',()=>{
     app.archive.start(); // does nothing until switched on in the scanner's Live RuneLite tab
-    console.log(`EVI Live — local only\nOpen ${app.origin}\nScanner key: ${app.secrets.scanner}\nRuneLite plugin key: ${app.secrets.plugin}\nKeep this window open. Press Ctrl+C to stop.\nPrivate records and keys are saved in the data folder. Do not share that folder.`);
+    // Hand the plugin its key rather than asking anybody to copy one. Deliberately HERE and not in
+    // createBridge: this is the one place that means "a person is really running the bridge", so no
+    // test can ever write into a real .runelite. See pairing.mjs -- it is a local file write between
+    // two halves of one installation, and leaves the 127.0.0.1 rule untouched.
+    let paired='';
+    try {
+      const home=process.env.USERPROFILE||process.env.HOME||'';
+      const plan=pairingPlan({home,key:app.secrets.plugin,sep:path.sep,
+        exists:q=>{try{fs.statSync(q);return true;}catch{return false;}},
+        read:q=>fs.readFileSync(q,'utf8')});
+      if(plan.write) {
+        fs.mkdirSync(pluginKeyDir(home,path.sep),{recursive:true});
+        fs.writeFileSync(plan.path,app.secrets.plugin,{mode:0o600});
+      }
+      paired=NL+plan.reason.charAt(0).toUpperCase()+plan.reason.slice(1)+'.';
+    } catch(e) { paired=NL+'Could not pair the RuneLite plugin automatically ('+e.message+'); paste the key below into its sidebar instead.'; }
+    console.log(`EVI Live — local only\nOpen ${app.origin}${paired}\nScanner key: ${app.secrets.scanner}\nRuneLite plugin key: ${app.secrets.plugin}\nKeep this window open. Press Ctrl+C to stop.\nPrivate records and keys are saved in the data folder. Do not share that folder.`);
   });
 }

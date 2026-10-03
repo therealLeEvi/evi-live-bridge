@@ -35,7 +35,7 @@
 //
 // Between releases this names the last release, which is honest: the running code is that bridge plus
 // whatever is unpushed. It is never a claim about unreleased work.
-const RELEASE = '2026.10.02b';
+const RELEASE = '2026.10.03';
 const DISCORD = 'le.evi';
 const HOME = 'https://github.com/therealLeEvi/evi-live-bridge';
 

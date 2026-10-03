@@ -283,3 +283,24 @@ test('csv import: the parser is served to the browser, and only to an unlocked o
   for (const route of ['/csvImport.mjs', '/api/flips/import', '/api/market/mapping'])
     assert.ok(page.includes(route), 'the page uses ' + route);
 });
+
+test('csv import: an Excel `sep=` directive is not mistaken for the header', () => {
+  // Excel writes this line whenever it saves a CSV, and EVI's own trade-log export writes one so the
+  // file opens in columns on a locale whose list separator is a semicolon. So a player can arrive with
+  // one through two ordinary routes, and before this the header parsed as ["sep=",""], suggestMapping
+  // found nothing, and they were told to "Map the item column" about a file that was entirely correct.
+  const CRLF = String.fromCharCode(13, 10), LF = String.fromCharCode(10);
+  const body = 'Item,Profit,Capital' + CRLF + 'Crystal bow,188781,14413426';
+  const expected = ['Item', 'Profit', 'Capital'];
+  for (const lead of ['sep=,' + CRLF, 'sep=;' + LF, 'sep=,' + String.fromCharCode(13), '﻿sep=,' + CRLF]) {
+    const table = parseDelimited(lead + body);
+    assert.deepEqual(table[0], expected, `a ${JSON.stringify(lead)} lead-in must not become the header`);
+    assert.deepEqual(suggestMapping(table[0]), {item: 0, profit: 1, capital: 2});
+    assert.equal(table.length, 2, 'and the trade row must survive');
+  }
+
+  // Only the first line, and only a single-character declaration: a genuine column whose name happens
+  // to start `sep=` is data, and a `sep=` appearing in a later row is a value, not a directive.
+  assert.deepEqual(parseDelimited('sep=x,Profit' + CRLF + 'a,1')[0], ['sep=x', 'Profit']);
+  assert.deepEqual(parseDelimited('Item,Profit' + CRLF + 'sep=,,5')[1], ['sep=', '', '5']);
+});

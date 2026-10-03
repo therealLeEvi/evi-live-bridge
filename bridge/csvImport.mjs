@@ -20,6 +20,13 @@ export function parseDelimited(text,delimiter=',') {
   if(typeof text!=='string'||text.length>10000000)throw Error('File exceeds the 10 MB text limit.');
   if(![',',';','\t'].includes(delimiter))throw Error('Choose comma, semicolon or tab.');
   text=text.replace(/^\uFEFF/,'');
+  // Excel writes a `sep=,` line when it saves a CSV, and EVI's own trade-log export writes one so
+  // Excel opens it in the right columns on a locale whose list separator is a semicolon. It is a
+  // directive, not data, so a file that has merely been through Excel must not lose its header to it
+  // -- without this the header reads ["sep=",""], suggestMapping finds nothing, and the player is
+  // told to "Map the item column" about a file that is entirely correct. Only the FIRST line, and
+  // only when it declares a single character, so a genuine column named `sep=x` is left alone.
+  text=text.replace(/^sep=.(\r\n|\r|\n)/i,'');
   const rows=[];let row=[],cell='',quoted=false,closed=false;
   const pushCell=()=>{row.push(cell);cell='';closed=false;if(row.length>MAX_COLUMNS)throw Error('Too many columns.');};
   const pushRow=()=>{pushCell();rows.push(row);row=[];if(rows.length>MAX_ROWS+1)throw Error('Too many rows.');};

@@ -1,6 +1,6 @@
-# EVI Live bridge
+# EVI Flipping Assistant bridge
 
-The local half of **EVI Live (Local)**, a personal Old School RuneScape Grand Exchange
+The local half of **EVI Flipping Assistant**, a personal Old School RuneScape Grand Exchange
 flip-tracking tool. This is a small Node.js server that runs on your own computer. The
 [RuneLite plugin](https://github.com/therealLeEvi/evi-live-plugin) reports the Grand Exchange offers
 you place yourself to this bridge, and asks it what to trade next.
